@@ -100,13 +100,14 @@ REPLY_HINT = (
     "After the turn ends, reply with a number or phrase:\n"
     "[1] Tell me more\n"
     "[2] Already knew that\n"
-    "[3] Dismiss\n"
-    "[4] Chat in main session\n"
-    'To include feedback, reply "4: your message".'
+    "[3] Dismiss"
 )
+DETAIL_HINT = '[3] Dismiss\n[4] Chat in main session\nTo include feedback, reply "4: your message".'
 REMINDER_HINT = (
-    "[1] Tell me more · [2] Already knew that · [3] Dismiss · [4] Chat in main session\n"
-    'Reply with a number; use "4: your message" to include feedback.'
+    "[1] Tell me more · [2] Already knew that · [3] Dismiss\nReply with a number or phrase."
+)
+DETAIL_REMINDER_HINT = (
+    '[3] Dismiss · [4] Chat in main session\nTo include feedback, reply "4: your message".'
 )
 REPLY_ACTIONS = {
     "1": "more",
@@ -144,7 +145,10 @@ def notifications(
         if active["id"] not in shown:
             messages.append(hook_result({"status": "finding", "note": active})["systemMessage"])
         reminder = any(item.get("reminder") for item in pending)
-        messages.append(REMINDER_HINT if reminder else REPLY_HINT)
+        if active["expanded"]:
+            messages.append(DETAIL_REMINDER_HINT if reminder else DETAIL_HINT)
+        else:
+            messages.append(REMINDER_HINT if reminder else REPLY_HINT)
     return {"systemMessage": "\n\n".join(messages)} if messages else {}
 
 
@@ -182,7 +186,7 @@ def reply(state: State, session_id: str, prompt: Any, turn_id: str | None = None
         evidence = "\n".join(f"> {quote}" for quote in note["evidence"])
         message = (
             f"You Should Know [{note['id']}] · {note['summary']}\n\n"
-            f"{note['explanation']}\n\nTranscript evidence:\n{evidence}\n\n{REPLY_HINT}"
+            f"{note['explanation']}\n\nTranscript evidence:\n{evidence}\n\n{DETAIL_HINT}"
         )
     else:
         disposition = "marked as already known" if action == "known" else "dismissed"

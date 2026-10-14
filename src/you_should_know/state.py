@@ -83,7 +83,8 @@ class State:
                 self.connection.execute(
                     "CREATE TABLE reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                     "session_id TEXT NOT NULL, note_id TEXT NOT NULL UNIQUE, "
-                    "last_turn_id TEXT NOT NULL DEFAULT '')"
+                    "last_turn_id TEXT NOT NULL DEFAULT '', "
+                    "expanded INTEGER NOT NULL DEFAULT 0)"
                 )
                 self.connection.execute(
                     "CREATE INDEX reminders_session ON reminders(session_id, id)"
@@ -95,6 +96,12 @@ class State:
                     "FROM interactions JOIN notes ON notes.id = interactions.note_id "
                     "WHERE notes.status = 'new'"
                 )
+            else:
+                columns = self.connection.execute("PRAGMA table_info(reminders)").fetchall()
+                if not any(column["name"] == "expanded" for column in columns):
+                    self.connection.execute(
+                        "ALTER TABLE reminders ADD COLUMN expanded INTEGER NOT NULL DEFAULT 0"
+                    )
 
     def close(self) -> None:
         self.connection.close()
@@ -219,7 +226,7 @@ class State:
             self.connection.execute("DELETE FROM notifications WHERE session_id = ?", (session_id,))
             if ready and turn_id:
                 note = self.connection.execute(
-                    "SELECT notes.*, reminders.last_turn_id FROM reminders "
+                    "SELECT notes.*, reminders.last_turn_id, reminders.expanded FROM reminders "
                     "JOIN notes ON notes.id = reminders.note_id "
                     "WHERE reminders.session_id = ? AND notes.status = 'new' "
                     "ORDER BY reminders.id DESC LIMIT 1",
@@ -234,6 +241,7 @@ class State:
                     )
                     if note["last_turn_id"] != turn_id:
                         armed_note = self._decode(note)
+                        armed_note["expanded"] = bool(armed_note["expanded"])
                         last_turn_id = armed_note.pop("last_turn_id")
                         if last_turn_id:
                             notifications.append({"note": armed_note, "reminder": True})
@@ -251,19 +259,32 @@ class State:
         with self._transaction():
             # A Stop hook can resume the same turn, whose steering must reach the agent.
             note = self.connection.execute(
-                "SELECT notes.* FROM interactions JOIN notes ON notes.id = interactions.note_id "
+                "SELECT notes.*, reminders.expanded FROM interactions "
+                "JOIN notes ON notes.id = interactions.note_id "
+                "JOIN reminders ON reminders.note_id = notes.id "
                 "WHERE interactions.session_id = ? AND interactions.ready = 1 "
                 "AND interactions.turn_id != '' AND interactions.turn_id != ? "
                 "AND ? != '' "
                 "AND notes.status = 'new'",
                 (session_id, turn_id, turn_id),
             ).fetchone()
-            if action is None or note is None:
+            if (
+                action is None
+                or note is None
+                or (note["expanded"] and action in {"more", "known"})
+                or (not note["expanded"] and action == "chat")
+            ):
                 self.connection.execute(
                     "UPDATE interactions SET ready = 0 WHERE session_id = ?", (session_id,)
                 )
                 return None
             result = self._decode(note)
+            result["expanded"] = bool(result["expanded"])
+            if action == "more":
+                self.connection.execute(
+                    "UPDATE reminders SET expanded = 1 WHERE note_id = ?", (note["id"],)
+                )
+                result["expanded"] = True
             if action in {"known", "dismissed"}:
                 self.connection.execute(
                     "UPDATE notes SET status = ? WHERE id = ?", (action, note["id"])

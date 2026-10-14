@@ -336,17 +336,18 @@ def test_stop_delivers_background_finding_even_when_review_is_on_cooldown(
         "[1] Tell me more",
         "[2] Already knew that",
         "[3] Dismiss",
-        "[4] Chat in main session",
     ):
         assert option in output["systemMessage"]
+    assert "Chat in main session" not in output["systemMessage"]
+    assert "4:" not in output["systemMessage"]
     assert set(output) == {"systemMessage"}
     assert state.session("s").attempts == 1
     assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
-@pytest.mark.parametrize("more,known", [("Tell me more!", "already knew that"), ("1", "2")])
+@pytest.mark.parametrize("more,dismiss", [("Tell me more!", "dismiss"), ("1", "3")])
 def test_organic_replies_need_no_skill_or_main_agent_context(
-    state, finding, monkeypatch, capsys, more, known
+    state, finding, monkeypatch, capsys, more, dismiss
 ):
     identifier = state.save("s", finding, 100, notify=True)
     state.deliver("s", ready=True, turn_id="finished-turn")
@@ -361,14 +362,36 @@ def test_organic_replies_need_no_skill_or_main_agent_context(
     assert details["continue"] is False
     assert finding.explanation in details["systemMessage"]
     assert all(quote in details["systemMessage"] for quote in finding.evidence)
+    assert "[3] Dismiss" in details["systemMessage"]
     assert "[4] Chat in main session" in details["systemMessage"]
+    assert "[1]" not in details["systemMessage"]
+    assert "[2]" not in details["systemMessage"]
+    assert "After the turn ends" not in details["systemMessage"]
     assert "$you-should-know" not in details["systemMessage"]
-    event["prompt"] = known
+    event["prompt"] = dismiss
+    confirmation = run_hook(state, monkeypatch, capsys, event)
+    assert confirmation["continue"] is False
+    assert "dismissed" in confirmation["systemMessage"]
+    assert state.note(identifier)["status"] == "dismissed"
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+@pytest.mark.parametrize("prompt", ["2", "already knew that", "YSK KNOWN!"])
+def test_summary_can_be_marked_known_without_reading_details(
+    state, finding, monkeypatch, capsys, prompt
+):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+        "turn_id": "known-turn",
+    }
     confirmation = run_hook(state, monkeypatch, capsys, event)
     assert confirmation["continue"] is False
     assert "already known" in confirmation["systemMessage"]
     assert state.note(identifier)["status"] == "known"
-    assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
 @pytest.mark.parametrize("prompt", ["dismiss", "3"])
@@ -401,6 +424,7 @@ def test_chat_hands_only_selected_note_to_agent_and_allows_user_prompt(
 ):
     identifier = state.save("s", finding, 100, notify=True)
     state.deliver("s", ready=True, turn_id="finished-turn")
+    assert state.reply("s", "more", turn_id="details-turn") is not None
     state.save(
         "another-session",
         replace(finding, topic="Other private topic", summary="Other private summary"),
@@ -444,7 +468,10 @@ def test_chat_cannot_share_other_sessions_or_active_turn_notes(
     state, finding, monkeypatch, capsys, session_id, turn_id, ready
 ):
     state.save("s", finding, 100, notify=True)
-    state.deliver("s", ready=ready, turn_id="finished-turn")
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    assert state.reply("s", "more", turn_id="details-turn") is not None
+    if not ready:
+        state.reply("s", None, turn_id="task-turn")
     event = {
         "session_id": session_id,
         "hook_event_name": "UserPromptSubmit",
@@ -452,6 +479,27 @@ def test_chat_cannot_share_other_sessions_or_active_turn_notes(
         "turn_id": turn_id,
     }
     assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+@pytest.mark.parametrize(
+    "prompt", ["4", "4: please discuss it", "chat in main session", "ysk chat"]
+)
+def test_chat_before_details_passes_through_without_sharing(
+    state, finding, monkeypatch, capsys, prompt
+):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+        "turn_id": "chat-turn",
+    }
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    assert state.note(identifier)["status"] == "new"
+    _, active = state.deliver("s", ready=True, turn_id="chat-turn")
+    assert active["id"] == identifier
+    assert active["expanded"] is False
 
 
 def test_numbered_details_then_chat_shares_the_same_full_note(state, finding, monkeypatch, capsys):
@@ -535,8 +583,9 @@ def test_ordinary_prompts_clear_reply_target_and_pass_through(
     assert state.note(identifier)["status"] == "new"
 
 
+@pytest.mark.parametrize("expanded", [False, True])
 def test_ordinary_work_ends_with_a_compact_reminder_even_when_checks_are_capped(
-    state, transcript, finding, monkeypatch, capsys
+    state, transcript, finding, monkeypatch, capsys, expanded
 ):
     (state.directory / "config.toml").write_text("max_checks_per_session = 1\n")
     state.observe("s", False)
@@ -550,6 +599,15 @@ def test_ordinary_work_ends_with_a_compact_reminder_even_when_checks_are_capped(
     }
     first = run_hook(state, monkeypatch, capsys, stop)
     assert "[1] Tell me more\n[2] Already knew that" in first["systemMessage"]
+    assert "[4]" not in first["systemMessage"]
+    if expanded:
+        details_event = {
+            "session_id": "s",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "1",
+            "turn_id": "details-turn",
+        }
+        assert run_hook(state, monkeypatch, capsys, details_event)["continue"] is False
     ordinary = {
         "session_id": "s",
         "hook_event_name": "UserPromptSubmit",
@@ -561,7 +619,13 @@ def test_ordinary_work_ends_with_a_compact_reminder_even_when_checks_are_capped(
     reminder = run_hook(state, monkeypatch, capsys, stop)
     assert set(reminder) == {"systemMessage"}
     assert finding.summary in reminder["systemMessage"]
-    assert "[1] Tell me more · [2] Already knew that" in reminder["systemMessage"]
+    if expanded:
+        assert "[3] Dismiss · [4] Chat in main session" in reminder["systemMessage"]
+        assert "[1]" not in reminder["systemMessage"]
+        assert "[2]" not in reminder["systemMessage"]
+    else:
+        assert "[1] Tell me more · [2] Already knew that" in reminder["systemMessage"]
+        assert "[4]" not in reminder["systemMessage"]
     assert finding.explanation not in reminder["systemMessage"]
     assert run_hook(state, monkeypatch, capsys, stop) == {}
     ordinary.update(prompt="3", turn_id="dismiss-turn")

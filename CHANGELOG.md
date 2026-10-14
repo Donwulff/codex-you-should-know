@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-14
+
+### Changed
+
+- Split note replies into two stages. Initial alerts offer Tell me more, Already knew that, and Dismiss. After reading details, you see only `[3] Dismiss` and `[4] Chat in main session`, with the hint for including feedback.
+- Made chat available only after reading details. Reminders preserve each note's menu stage across ordinary work and session restarts.
+
+Restart Codex after updating. Existing pending notes start with the initial menu; read their details again to enable chat. The four hook definitions are unchanged.
+
 ## [0.2.3] - 2026-10-14
 
 ### Added
@@ -63,7 +72,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.0...v0.2.1

@@ -4,7 +4,7 @@ Catch consequential oversights while Codex works. You Should Know runs an indepe
 
 For example, if you ask Codex to change one setting while preserving the others, and it replaces the entire settings file, the reviewer can flag the lost settings even when Codex claims the task succeeded.
 
-Inspired by Claude Code's `cc-plugin-you-should-know`. Alerts appear automatically in your conversation with numbered options. At the end of the turn, type a number and press Enter: **1** to learn more, **2** to mark the note as known, **3** to dismiss it, or **4** to chat in the main session. You do not need to remember a phrase or invoke a skill. Numbered replies work in the Codex CLI without terminal-specific setup; the options are text hints, not clickable buttons.
+Inspired by Claude Code's `cc-plugin-you-should-know`. Alerts appear automatically in your conversation with numbered options. At the end of the turn, type a number and press Enter: **1** to learn more, **2** to mark the note as known, or **3** to dismiss it. After you read the details, choose **3** to dismiss or **4** to chat in the main session. You do not need to remember a phrase or invoke a skill. Numbered replies work in the Codex CLI without terminal-specific setup; the options are text hints, not clickable buttons.
 
 ## Install
 
@@ -74,35 +74,44 @@ After the turn ends, reply with a number or phrase:
 [1] Tell me more
 [2] Already knew that
 [3] Dismiss
-[4] Chat in main session
-To include feedback, reply "4: your message".
 ```
 
-The reply options appear when the turn finishes and repeat after you read the details. Type the number or phrase, then press Enter:
+The initial reply options appear when the turn finishes. Type the number or phrase, then press Enter:
 
 | Reply | Result |
 | --- | --- |
 | `1` or `tell me more` | Display the explanation and supporting transcript quotes. |
 | `2` or `already knew that` | Mark the topic as known so it stays suppressed. |
 | `3` or `dismiss` | Dismiss the note and keep it out of future alerts. |
-| `4` or `chat in main session` | Share the note and its evidence with Codex so you can discuss it or request action. |
 
-These replies act on the most recent displayed note in the current session. Reading details leaves the reply options active. If you continue ordinary work, the shortcuts pause during that work and the note returns at turn end with compact choices:
+After you choose **1**, the plugin displays the explanation and evidence with only these options:
+
+```text
+[3] Dismiss
+[4] Chat in main session
+To include feedback, reply "4: your message".
+```
+
+The numbers keep the same meaning between menus. Chat becomes available only after you read the details. You can use `dismiss` or `chat in main session` instead of a number.
+
+These replies act on the most recent displayed note in the current session. If you continue ordinary work, the shortcuts pause during that work and the note returns at turn end with compact choices. Before you read the details, the reminder looks like this:
 
 ```text
 You Should Know [8f31a7c62b40] · Your previous settings were deleted.
 
-[1] Tell me more · [2] Already knew that · [3] Dismiss · [4] Chat in main session
-Reply with a number; use "4: your message" to include feedback.
+[1] Tell me more · [2] Already knew that · [3] Dismiss
+Reply with a number or phrase.
 ```
+
+After you read the details, reminders retain only `[3] Dismiss` and `[4] Chat in main session`, including the feedback hint. The menu stage survives resuming the same session.
 
 The reminder repeats at most once per turn until you mark the note as known, dismiss it, or share it using `4`. It appears near the prompt after the turn; it is not pinned during streaming output. Reminders survive resuming the same session and do not require another model review. If several notes are pending, the newest appears first. After you resolve or share it, the next pending note appears at the end of a later turn.
 
-Replies are inactive during work, so they cannot stop a running task. When no note is active, numbers pass through as ordinary messages. You can also use `ysk more`, `ysk known`, `ysk dismiss`, and `ysk chat` while the options are active.
+Replies are inactive during work, so they cannot stop a running task. When no note is active, or a choice is unavailable in the displayed menu, replies pass through as ordinary messages without sharing the note. The aliases `ysk more`, `ysk known`, `ysk dismiss`, and `ysk chat` follow the same menu stages.
 
 The first three replies are handled locally. Codex displays a **Hook stopped** heading because the hook answers the reply and stops normal prompt processing. The note stays outside the main agent's context until you choose to share it. Alerts themselves never stop the task.
 
-Choose **4** or **chat in main session** to hand the selected note to Codex. The agent receives its summary, explanation, and supporting transcript quotes, then responds normally. Sharing does not mark the note as known or dismissed. You can include feedback or a request after a colon, such as `4: Please check whether this applies here.`
+After reading the details, choose **4** or **chat in main session** to hand the selected note to Codex. The agent receives its summary, explanation, and supporting transcript quotes, then responds normally. Sharing does not mark the note as known or dismissed. You can include feedback or a request after a colon, such as `4: Please check whether this applies here.`
 
 This reply does not stop the turn. Once the note is shared, continue the discussion normally; you do not need its ID or a skill command. Sharing a note alone does not ask Codex to change files, but you can include an explicit request to fix the issue.
 
@@ -118,7 +127,7 @@ After an alert appears and Codex finishes its turn:
    1
    ```
 
-   The plugin shows the explanation and supporting transcript quotes. The main agent has not received the note, and the reply options remain active.
+   The plugin shows the explanation and supporting transcript quotes. The main agent has not received the note. You now see only `[3] Dismiss` and `[4] Chat in main session`, plus the hint for adding feedback.
 
 2. Pass that context to the main agent, with your own feedback if needed:
 
