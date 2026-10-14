@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified the README with a two-step example for reading a note privately, then sharing its full context and optional feedback with the main agent.
+
 ## [0.2.1] - 2026-10-14
 
 ### Added

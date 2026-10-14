@@ -86,15 +86,33 @@ These replies act on the most recent displayed note in the current session. Read
 
 The first three replies are handled locally. Codex displays a **Hook stopped** heading because the hook answers the reply and stops normal prompt processing. The note stays outside the main agent's context until you choose to share it. Alerts themselves never stop the task.
 
-Choose **chat in main session** to hand the selected note to Codex. The agent receives its summary, explanation, and supporting transcript quotes, then responds normally. Sharing does not mark the note as known or dismissed. You can include feedback or a request after a colon:
-
-```text
-chat in main session: This was intentional. Does the concern still apply?
-```
+Choose **chat in main session** to hand the selected note to Codex. The agent receives its summary, explanation, and supporting transcript quotes, then responds normally. Sharing does not mark the note as known or dismissed. You can include feedback or a request after a colon.
 
 This reply does not stop the turn. Once the note is shared, continue the discussion normally; you do not need its ID or a skill command. Sharing a note alone does not ask Codex to change files, but you can include an explicit request to fix the issue.
 
 To revisit older notes or share one with the agent, use an ordinary request such as "Show my You Should Know notes" or "Explain You Should Know note 8f31a7c62b40." The bundled skill and command-line interface remain available for these requests.
+
+### Example: read a note, then discuss it
+
+After an alert appears and Codex finishes its turn:
+
+1. Read the expanded explanation privately:
+
+   ```text
+   tell me more
+   ```
+
+   The plugin shows the explanation and supporting transcript quotes. The main agent has not received the note, and the reply options remain active.
+
+2. Pass that context to the main agent, with your own feedback if needed:
+
+   ```text
+   chat in main session: This was intentional. Does the concern still apply?
+   ```
+
+   Codex receives the same full explanation and evidence you just read, along with your message. It responds normally, and you can continue the discussion without a note ID or skill command.
+
+Send the second reply before an unrelated task prompt, which clears the selected note. To share the note without adding a message, reply `chat in main session` alone.
 
 ## Command-line access
 
