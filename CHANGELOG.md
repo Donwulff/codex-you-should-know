@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-14
+
+### Changed
+
+- Accept feedback after a space in the chat reply, such as `4 hi` or `4 Please check this`. The colon form still works. Updated hints and examples to show the simpler form.
+
+Chat still requires reading the note's details first. Sharing passes the full note and your unchanged message to the main agent, then clears the reminder. Restart Codex after updating; the four hook definitions are unchanged.
+
 ## [0.2.4] - 2026-10-14
 
 ### Changed
@@ -72,7 +80,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.1...v0.2.2

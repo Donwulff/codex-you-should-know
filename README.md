@@ -89,7 +89,7 @@ After you choose **1**, the plugin displays the explanation and evidence with on
 ```text
 [3] Dismiss
 [4] Chat in main session
-To include feedback, reply "4: your message".
+To include feedback, reply "4 your message".
 ```
 
 The numbers keep the same meaning between menus. Chat becomes available only after you read the details. You can use `dismiss` or `chat in main session` instead of a number.
@@ -111,7 +111,7 @@ Replies are inactive during work, so they cannot stop a running task. When no no
 
 The first three replies are handled locally. Codex displays a **Hook stopped** heading because the hook answers the reply and stops normal prompt processing. The note stays outside the main agent's context until you choose to share it. Alerts themselves never stop the task.
 
-After reading the details, choose **4** or **chat in main session** to hand the selected note to Codex. The agent receives its summary, explanation, and supporting transcript quotes, then responds normally. Sharing does not mark the note as known or dismissed. You can include feedback or a request after a colon, such as `4: Please check whether this applies here.`
+After reading the details, choose **4** or **chat in main session** to hand the selected note to Codex. The agent receives its summary, explanation, and supporting transcript quotes, then responds normally. Sharing does not mark the note as known or dismissed. Add feedback or a request after a space, such as `4 Please check whether this applies here.` The colon form, `4: your message`, still works. Your original message reaches the agent unchanged.
 
 This reply does not stop the turn. Once the note is shared, continue the discussion normally; you do not need its ID or a skill command. Sharing a note alone does not ask Codex to change files, but you can include an explicit request to fix the issue.
 
@@ -132,7 +132,7 @@ After an alert appears and Codex finishes its turn:
 2. Pass that context to the main agent, with your own feedback if needed:
 
    ```text
-   4: This was intentional. Does the concern still apply?
+   4 This was intentional. Does the concern still apply?
    ```
 
    Codex receives the same full explanation and evidence you just read, along with your message. It responds normally, and you can continue the discussion without a note ID or skill command.

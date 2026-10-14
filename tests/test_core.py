@@ -364,6 +364,7 @@ def test_organic_replies_need_no_skill_or_main_agent_context(
     assert all(quote in details["systemMessage"] for quote in finding.evidence)
     assert "[3] Dismiss" in details["systemMessage"]
     assert "[4] Chat in main session" in details["systemMessage"]
+    assert 'reply "4 your message"' in details["systemMessage"]
     assert "[1]" not in details["systemMessage"]
     assert "[2]" not in details["systemMessage"]
     assert "After the turn ends" not in details["systemMessage"]
@@ -416,6 +417,11 @@ def test_dismiss_reply_is_local_and_persistent(state, finding, monkeypatch, caps
         "chat in main session: This was intentional; explain the tradeoff.",
         "ysk chat : Please preserve my feedback exactly.",
         "4",
+        "4 hi",
+        "4 Please check URL https://example.test:8443 and keep MiXeD case.",
+        "  4   This was intentional.  ",
+        "4\tPlease explain.",
+        "4\nPlease explain.",
         "4: This was intentional; explain the tradeoff.",
     ],
 )
@@ -453,6 +459,7 @@ def test_chat_hands_only_selected_note_to_agent_and_allows_user_prompt(
     assert run_hook(state, monkeypatch, capsys, event) == {}
     event["prompt"] = "dismiss"
     assert run_hook(state, monkeypatch, capsys, event) == {}
+    assert state.deliver("s", ready=True, turn_id="later-turn") == ([], None)
 
 
 @pytest.mark.parametrize(
@@ -482,7 +489,7 @@ def test_chat_cannot_share_other_sessions_or_active_turn_notes(
 
 
 @pytest.mark.parametrize(
-    "prompt", ["4", "4: please discuss it", "chat in main session", "ysk chat"]
+    "prompt", ["4", "4 hi", "4: please discuss it", "chat in main session", "ysk chat"]
 )
 def test_chat_before_details_passes_through_without_sharing(
     state, finding, monkeypatch, capsys, prompt
@@ -527,7 +534,7 @@ def test_numbered_details_then_chat_shares_the_same_full_note(state, finding, mo
     assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
-@pytest.mark.parametrize("prompt", ["1", "2", "3", "4", "4: please discuss it"])
+@pytest.mark.parametrize("prompt", ["1", "2", "3", "4", "4 hi", "4: please discuss it"])
 @pytest.mark.parametrize(
     "ready,turn_id", [(False, "next-turn"), (True, "finished-turn"), (True, None)]
 )
@@ -560,17 +567,24 @@ def test_numbered_replies_pass_through_when_note_actions_are_inactive(
         "0",
         "5",
         "12",
+        "40 hi",
+        "4hi",
+        "4. hi",
+        "4/hi",
         "1 more thing",
         "1: please explain",
         "2: already knew",
         "3: dismiss this",
     ],
 )
+@pytest.mark.parametrize("expanded", [False, True])
 def test_ordinary_prompts_clear_reply_target_and_pass_through(
-    state, finding, monkeypatch, capsys, prompt
+    state, finding, monkeypatch, capsys, prompt, expanded
 ):
     identifier = state.save("s", finding, 100, notify=True)
     state.deliver("s", ready=True, turn_id="finished-turn")
+    if expanded:
+        assert state.reply("s", "more", turn_id="details-turn") is not None
     event = {
         "session_id": "s",
         "hook_event_name": "UserPromptSubmit",
@@ -621,6 +635,7 @@ def test_ordinary_work_ends_with_a_compact_reminder_even_when_checks_are_capped(
     assert finding.summary in reminder["systemMessage"]
     if expanded:
         assert "[3] Dismiss · [4] Chat in main session" in reminder["systemMessage"]
+        assert 'reply "4 your message"' in reminder["systemMessage"]
         assert "[1]" not in reminder["systemMessage"]
         assert "[2]" not in reminder["systemMessage"]
     else:
