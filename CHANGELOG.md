@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-14
+
+### Added
+
+- Added compact end-of-turn reminders for pending notes, so continuing ordinary work brings the note back near the prompt. Reading details keeps the reminder; marking known, dismissing, or sharing with the main agent clears it.
+- Preserved older pending reminders when a newer note appears. The newest is shown first, and the next pending note appears on a later turn after you resolve or share it.
+
+Reminders survive resuming the same session and do not make extra reviewer calls. They repeat at most once per turn and are not pinned during streaming output. Updating preserves an active note's reminder without resurfacing historical notes. Restart Codex to load the change; the four hook definitions are unchanged.
+
 ## [0.2.2] - 2026-10-14
 
 ### Added
@@ -54,7 +63,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/iliaal/codex-you-should-know/releases/tag/v0.2.0

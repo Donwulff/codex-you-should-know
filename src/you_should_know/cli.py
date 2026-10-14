@@ -104,6 +104,10 @@ REPLY_HINT = (
     "[4] Chat in main session\n"
     'To include feedback, reply "4: your message".'
 )
+REMINDER_HINT = (
+    "[1] Tell me more · [2] Already knew that · [3] Dismiss · [4] Chat in main session\n"
+    'Reply with a number; use "4: your message" to include feedback.'
+)
 REPLY_ACTIONS = {
     "1": "more",
     "tell me more": "more",
@@ -139,7 +143,8 @@ def notifications(
     if active:
         if active["id"] not in shown:
             messages.append(hook_result({"status": "finding", "note": active})["systemMessage"])
-        messages.append(REPLY_HINT)
+        reminder = any(item.get("reminder") for item in pending)
+        messages.append(REMINDER_HINT if reminder else REPLY_HINT)
     return {"systemMessage": "\n\n".join(messages)} if messages else {}
 
 

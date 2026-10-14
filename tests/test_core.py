@@ -535,6 +535,43 @@ def test_ordinary_prompts_clear_reply_target_and_pass_through(
     assert state.note(identifier)["status"] == "new"
 
 
+def test_ordinary_work_ends_with_a_compact_reminder_even_when_checks_are_capped(
+    state, transcript, finding, monkeypatch, capsys
+):
+    (state.directory / "config.toml").write_text("max_checks_per_session = 1\n")
+    state.observe("s", False)
+    state.begin("s", 100)
+    identifier = state.save("s", finding, 100, notify=True)
+    stop = {
+        "session_id": "s",
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+        "turn_id": "first-turn",
+    }
+    first = run_hook(state, monkeypatch, capsys, stop)
+    assert "[1] Tell me more\n[2] Already knew that" in first["systemMessage"]
+    ordinary = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Explain the next task.",
+        "turn_id": "next-turn",
+    }
+    assert run_hook(state, monkeypatch, capsys, ordinary) == {}
+    stop["turn_id"] = "next-turn"
+    reminder = run_hook(state, monkeypatch, capsys, stop)
+    assert set(reminder) == {"systemMessage"}
+    assert finding.summary in reminder["systemMessage"]
+    assert "[1] Tell me more · [2] Already knew that" in reminder["systemMessage"]
+    assert finding.explanation not in reminder["systemMessage"]
+    assert run_hook(state, monkeypatch, capsys, stop) == {}
+    ordinary.update(prompt="3", turn_id="dismiss-turn")
+    assert run_hook(state, monkeypatch, capsys, ordinary)["continue"] is False
+    assert state.note(identifier)["status"] == "dismissed"
+    stop["turn_id"] = "later-turn"
+    assert run_hook(state, monkeypatch, capsys, stop) == {}
+    assert state.session("s").attempts == 1
+
+
 def test_midturn_notification_has_no_action_until_stop(state, finding, monkeypatch, capsys):
     state.save("s", finding, 100, notify=True)
     event = {"session_id": "s", "hook_event_name": "PostToolUse"}

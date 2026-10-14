@@ -96,29 +96,77 @@ def test_stop_arms_midturn_notification_without_repeating_summary(state):
 
 
 @pytest.mark.parametrize("action", ["more", "known", "dismissed", "chat"])
-def test_midturn_reply_cannot_act_and_clears_target(state, action):
+def test_midturn_reply_disarms_actions_but_keeps_note_for_stop(state, action):
     identifier = state.save("session", finding(), 100, notify=True)
     state.deliver("session")
     assert state.reply("session", action, turn_id="reply-turn") is None
-    assert state.deliver("session", ready=True, turn_id="finished-turn") == ([], None)
+    assert state.deliver("session", ready=True, turn_id="finished-turn") == (
+        [],
+        state.note(identifier),
+    )
     assert state.note(identifier)["status"] == "new"
 
 
-def test_ordinary_prompt_clears_ready_target_without_changing_note(state):
+def test_ordinary_prompt_disarms_actions_until_later_stop_reminds(state):
     identifier = state.save("session", finding(), 100, notify=True)
     state.deliver("session", ready=True, turn_id="finished-turn")
     assert state.reply("session", None, turn_id="reply-turn") is None
     assert state.reply("session", "known", turn_id="reply-turn") is None
     assert state.note(identifier)["status"] == "new"
+    expected = state.note(identifier)
+    assert state.deliver("session", ready=True, turn_id="reply-turn") == (
+        [{"note": expected, "reminder": True}],
+        expected,
+    )
+    assert state.reply("session", "known", turn_id="action-turn")["status"] == "known"
+    assert state.deliver("session", ready=True, turn_id="later-turn") == ([], None)
 
 
 @pytest.mark.parametrize("action", ["more", "known", "dismissed", "chat"])
-def test_same_turn_steering_clears_target_without_consuming_action(state, action):
+def test_same_turn_steering_disarms_until_stop_rearms_without_repeating_note(state, action):
     identifier = state.save("session", finding(), 100, notify=True)
     state.deliver("session", ready=True, turn_id="active-turn")
     assert state.reply("session", action, turn_id="active-turn") is None
     assert state.reply("session", action, turn_id="later-turn") is None
     assert state.note(identifier)["status"] == "new"
+    assert state.deliver("session", ready=True, turn_id="active-turn") == ([], None)
+    assert state.reply("session", "more", turn_id="later-turn") == state.note(identifier)
+
+
+def test_unresolved_note_is_reminded_once_on_each_distinct_turn(state):
+    identifier = state.save("session", finding(), 100, notify=True)
+    expected = state.note(identifier)
+    assert state.deliver("session", ready=True, turn_id="first-turn") == (
+        [{"note": expected}],
+        expected,
+    )
+    for turn_id in ("second-turn", "third-turn"):
+        assert state.deliver("session", ready=True, turn_id=turn_id) == (
+            [{"note": expected, "reminder": True}],
+            expected,
+        )
+        assert state.deliver("session", ready=True, turn_id=turn_id) == ([], None)
+
+
+def test_delivered_reminder_survives_reopen_after_an_ordinary_prompt(tmp_path):
+    directory = tmp_path / "state"
+    first = State(directory)
+    identifier = first.save("session", finding(), 100, notify=True)
+    assert identifier is not None
+    first.deliver("session", ready=True, turn_id="first-turn")
+    first.reply("session", None, turn_id="second-turn")
+    expected = first.note(identifier)
+    first.close()
+    reopened = State(directory)
+    try:
+        assert reopened.reply("session", "known", turn_id="second-turn") is None
+        assert reopened.deliver("session", ready=True, turn_id="second-turn") == (
+            [{"note": expected, "reminder": True}],
+            expected,
+        )
+        assert reopened.reply("session", "more", turn_id="reply-turn") == expected
+    finally:
+        reopened.close()
 
 
 @pytest.mark.parametrize("turn_id", [None, ""])
@@ -142,6 +190,7 @@ def test_missing_reply_turn_id_clears_target_without_consuming_action(state, tur
 def test_interaction_without_stored_turn_id_is_migrated_and_cannot_consume_reply(state):
     identifier = state.save("session", finding(), 100)
     with state.connection:
+        state.connection.execute("DROP TABLE reminders")
         state.connection.execute("DROP TABLE interactions")
         state.connection.execute(
             "CREATE TABLE interactions (session_id TEXT PRIMARY KEY, "
@@ -152,6 +201,47 @@ def test_interaction_without_stored_turn_id_is_migrated_and_cannot_consume_reply
     try:
         assert reopened.reply("session", "known", turn_id="reply-turn") is None
         assert reopened.note(identifier)["status"] == "new"
+        assert reopened.deliver("session", ready=True, turn_id="finished-turn") == (
+            [],
+            reopened.note(identifier),
+        )
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_migration_keeps_current_interaction_without_resurfacing_other_notes(state, ready):
+    historical = state.save("session", finding("historical"), 100, notify=True)
+    state.deliver("session", ready=True, turn_id="historical-turn")
+    shared = state.save("session", finding("shared"), 101, notify=True)
+    state.deliver("session", ready=True, turn_id="shared-turn")
+    state.reply("session", "chat", turn_id="chat-turn")
+    manual = state.save("session", finding("manual"), 102)
+    active = state.save("session", finding("active"), 103, notify=True)
+    state.deliver("session", ready=ready, turn_id="legacy-turn")
+    with state.connection:
+        state.connection.execute("DROP TABLE reminders")
+    migrated = State(state.directory)
+    try:
+        expected = migrated.note(active)
+        assert migrated.deliver("session", ready=True, turn_id="legacy-turn") == (
+            [],
+            None if ready else expected,
+        )
+        assert migrated.deliver("session", ready=True, turn_id="new-turn") == (
+            [{"note": expected, "reminder": True}],
+            expected,
+        )
+        assert migrated.reply("session", "chat", turn_id="reply-turn") == expected
+        assert migrated.deliver("session", ready=True, turn_id="later-turn") == ([], None)
+        assert all(
+            migrated.note(note_id)["status"] == "new" for note_id in (historical, shared, manual)
+        )
+    finally:
+        migrated.close()
+    reopened = State(state.directory)
+    try:
+        assert reopened.deliver("session", ready=True, turn_id="resumed-turn") == ([], None)
     finally:
         reopened.close()
 
@@ -161,8 +251,14 @@ def test_more_keeps_target_for_later_disposition(state):
     state.deliver("session", ready=True, turn_id="finished-turn")
     assert state.reply("session", "more", turn_id="reply-turn") == state.note(identifier)
     assert state.reply("session", "more", turn_id="reply-turn") == state.note(identifier)
-    assert state.reply("session", "known", turn_id="reply-turn")["status"] == "known"
+    expected = state.note(identifier)
+    assert state.deliver("session", ready=True, turn_id="later-turn") == (
+        [{"note": expected, "reminder": True}],
+        expected,
+    )
+    assert state.reply("session", "known", turn_id="action-turn")["status"] == "known"
     assert state.reply("session", "more", turn_id="reply-turn") is None
+    assert state.deliver("session", ready=True, turn_id="later-turn") == ([], None)
 
 
 def test_chat_returns_note_and_ends_interaction_without_disposition(state):
@@ -174,6 +270,7 @@ def test_chat_returns_note_and_ends_interaction_without_disposition(state):
     assert state.note(identifier)["status"] == "new"
     assert state.reply("session", "chat", turn_id="later-turn") is None
     assert state.reply("session", "dismissed", turn_id="later-turn") is None
+    assert state.deliver("session", ready=True, turn_id="later-turn") == ([], None)
 
 
 @pytest.mark.parametrize("action", ["known", "dismissed"])
@@ -185,6 +282,7 @@ def test_disposition_updates_note_and_clears_target(state, action):
     assert result["status"] == action
     assert state.notes() == []
     assert state.reply("session", "more", turn_id="reply-turn") is None
+    assert state.deliver("session", ready=True, turn_id="later-turn") == ([], None)
 
 
 @pytest.mark.parametrize("status", ["known", "dismissed"])
@@ -200,15 +298,18 @@ def test_resolved_pending_notes_are_skipped(state, status):
     assert state.deliver("session", ready=True, turn_id="finished-turn") == ([], None)
 
 
-def test_explicit_mark_invalidates_displayed_interaction(state):
+@pytest.mark.parametrize("status", ["known", "dismissed"])
+def test_explicit_mark_invalidates_displayed_interaction_and_reminder(state, status):
     identifier = state.save("session", finding(), 100, notify=True)
     state.deliver("session", ready=True, turn_id="finished-turn")
-    state.mark(identifier, "known")
+    state.mark(identifier, status)
     assert state.reply("session", "dismissed", turn_id="reply-turn") is None
-    assert state.note(identifier)["status"] == "known"
+    assert state.note(identifier)["status"] == status
+    assert state.deliver("session", ready=True, turn_id="later-turn") == ([], None)
 
 
-def test_new_midturn_note_replaces_previous_ready_target(state):
+@pytest.mark.parametrize("action", ["known", "dismissed", "chat"])
+def test_new_note_takes_precedence_without_losing_older_reminder(state, action):
     first = state.save("session", finding("first"), 100, notify=True)
     state.deliver("session", ready=True, turn_id="finished-turn")
     second = state.save("session", finding("second"), 200, notify=True)
@@ -216,6 +317,18 @@ def test_new_midturn_note_replaces_previous_ready_target(state):
     assert state.reply("session", "known", turn_id="reply-turn") is None
     assert state.note(first)["status"] == "new"
     assert state.note(second)["status"] == "new"
+    assert state.deliver("session", ready=True, turn_id="second-turn") == (
+        [],
+        state.note(second),
+    )
+    assert state.reply("session", action, turn_id="action-turn")["id"] == second
+    assert state.reply("session", "known", turn_id="action-turn") is None
+    expected = state.note(first)
+    assert state.deliver("session", ready=True, turn_id="third-turn") == (
+        [{"note": expected, "reminder": True}],
+        expected,
+    )
+    assert state.reply("session", "more", turn_id="reply-turn") == expected
 
 
 def test_unknown_actions_are_rejected_without_losing_target(state):
@@ -235,6 +348,40 @@ def test_note_and_notification_are_saved_atomically(state):
         state.save("session", finding(), 100, notify=True)
     assert state.notes(True) == []
     assert state.deliver("session", ready=True, turn_id="finished-turn") == ([], None)
+
+
+def test_failed_reminder_insert_leaves_notification_available_for_retry(state):
+    identifier = state.save("session", finding(), 100, notify=True)
+    expected = state.note(identifier)
+    state.connection.execute(
+        "CREATE TRIGGER fail_reminder BEFORE INSERT ON reminders "
+        "BEGIN SELECT RAISE(ABORT, 'reminder unavailable'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="reminder unavailable"):
+        state.deliver("session", ready=True, turn_id="finished-turn")
+    state.connection.execute("DROP TRIGGER fail_reminder")
+    assert state.deliver("session", ready=True, turn_id="finished-turn") == (
+        [{"note": expected}],
+        expected,
+    )
+
+
+def test_failed_disposition_keeps_note_and_reminder_actionable(state):
+    identifier = state.save("session", finding(), 100, notify=True)
+    state.deliver("session", ready=True, turn_id="first-turn")
+    state.connection.execute(
+        "CREATE TRIGGER fail_reminder_delete BEFORE DELETE ON reminders "
+        "BEGIN SELECT RAISE(ABORT, 'reminder unavailable'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="reminder unavailable"):
+        state.reply("session", "known", turn_id="reply-turn")
+    assert state.note(identifier)["status"] == "new"
+    assert state.reply("session", "more", turn_id="reply-turn") == state.note(identifier)
+    expected = state.note(identifier)
+    assert state.deliver("session", ready=True, turn_id="second-turn") == (
+        [{"note": expected, "reminder": True}],
+        expected,
+    )
 
 
 def test_old_database_is_preserved_without_replaying_existing_notes(tmp_path):

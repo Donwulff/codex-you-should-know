@@ -87,7 +87,18 @@ The reply options appear when the turn finishes and repeat after you read the de
 | `3` or `dismiss` | Dismiss the note and keep it out of future alerts. |
 | `4` or `chat in main session` | Share the note and its evidence with Codex so you can discuss it or request action. |
 
-These replies act on the most recent displayed note in the current session. Reading details leaves the reply options active. An ordinary task prompt or a handoff to the main session ends that interaction; the plugin does not intercept later replies about an old note. Replies are inactive during work, so they cannot stop a running task. When no note is active, numbers pass through as ordinary messages. You can also use `ysk more`, `ysk known`, `ysk dismiss`, and `ysk chat` while the options are active.
+These replies act on the most recent displayed note in the current session. Reading details leaves the reply options active. If you continue ordinary work, the shortcuts pause during that work and the note returns at turn end with compact choices:
+
+```text
+You Should Know [8f31a7c62b40] · Your previous settings were deleted.
+
+[1] Tell me more · [2] Already knew that · [3] Dismiss · [4] Chat in main session
+Reply with a number; use "4: your message" to include feedback.
+```
+
+The reminder repeats at most once per turn until you mark the note as known, dismiss it, or share it using `4`. It appears near the prompt after the turn; it is not pinned during streaming output. Reminders survive resuming the same session and do not require another model review. If several notes are pending, the newest appears first. After you resolve or share it, the next pending note appears at the end of a later turn.
+
+Replies are inactive during work, so they cannot stop a running task. When no note is active, numbers pass through as ordinary messages. You can also use `ysk more`, `ysk known`, `ysk dismiss`, and `ysk chat` while the options are active.
 
 The first three replies are handled locally. Codex displays a **Hook stopped** heading because the hook answers the reply and stops normal prompt processing. The note stays outside the main agent's context until you choose to share it. Alerts themselves never stop the task.
 
@@ -117,7 +128,7 @@ After an alert appears and Codex finishes its turn:
 
    Codex receives the same full explanation and evidence you just read, along with your message. It responds normally, and you can continue the discussion without a note ID or skill command.
 
-Send the second reply before an unrelated task prompt, which clears the selected note. To share the note without adding a message, reply `4` alone. The phrases `tell me more` and `chat in main session: your message` work too.
+To share the note without adding a message, reply `4` alone. The phrases `tell me more` and `chat in main session: your message` work too. If you continue another task first, wait for the reminder at turn end before replying. Check its summary: the numbered choices always target the latest displayed note.
 
 ## Command-line access
 

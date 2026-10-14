@@ -76,6 +76,25 @@ class State:
                 self.connection.execute(
                     "ALTER TABLE interactions ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''"
                 )
+            reminders = self.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reminders'"
+            ).fetchone()
+            if reminders is None:
+                self.connection.execute(
+                    "CREATE TABLE reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "session_id TEXT NOT NULL, note_id TEXT NOT NULL UNIQUE, "
+                    "last_turn_id TEXT NOT NULL DEFAULT '')"
+                )
+                self.connection.execute(
+                    "CREATE INDEX reminders_session ON reminders(session_id, id)"
+                )
+                self.connection.execute(
+                    "INSERT INTO reminders(session_id, note_id, last_turn_id) "
+                    "SELECT interactions.session_id, interactions.note_id, "
+                    "CASE WHEN interactions.ready = 1 THEN interactions.turn_id ELSE '' END "
+                    "FROM interactions JOIN notes ON notes.id = interactions.note_id "
+                    "WHERE notes.status = 'new'"
+                )
 
     def close(self) -> None:
         self.connection.close()
@@ -188,6 +207,10 @@ class State:
                     continue
                 notifications.append({"note": self._decode(note)})
                 self.connection.execute(
+                    "INSERT OR IGNORE INTO reminders(session_id, note_id) VALUES (?, ?)",
+                    (session_id, note["id"]),
+                )
+                self.connection.execute(
                     "INSERT INTO interactions(session_id, note_id, ready) VALUES (?, ?, 0) "
                     "ON CONFLICT(session_id) DO UPDATE SET "
                     "note_id = excluded.note_id, ready = 0, turn_id = ''",
@@ -196,18 +219,28 @@ class State:
             self.connection.execute("DELETE FROM notifications WHERE session_id = ?", (session_id,))
             if ready and turn_id:
                 note = self.connection.execute(
-                    "SELECT notes.* FROM interactions "
-                    "JOIN notes ON notes.id = interactions.note_id "
-                    "WHERE interactions.session_id = ? AND interactions.ready = 0 "
-                    "AND notes.status = 'new'",
+                    "SELECT notes.*, reminders.last_turn_id FROM reminders "
+                    "JOIN notes ON notes.id = reminders.note_id "
+                    "WHERE reminders.session_id = ? AND notes.status = 'new' "
+                    "ORDER BY reminders.id DESC LIMIT 1",
                     (session_id,),
                 ).fetchone()
                 if note is not None:
                     self.connection.execute(
-                        "UPDATE interactions SET ready = 1, turn_id = ? WHERE session_id = ?",
-                        (turn_id, session_id),
+                        "INSERT INTO interactions(session_id, note_id, ready, turn_id) "
+                        "VALUES (?, ?, 1, ?) ON CONFLICT(session_id) DO UPDATE SET "
+                        "note_id = excluded.note_id, ready = 1, turn_id = excluded.turn_id",
+                        (session_id, note["id"], turn_id),
                     )
-                    armed_note = self._decode(note)
+                    if note["last_turn_id"] != turn_id:
+                        armed_note = self._decode(note)
+                        last_turn_id = armed_note.pop("last_turn_id")
+                        if last_turn_id:
+                            notifications.append({"note": armed_note, "reminder": True})
+                        self.connection.execute(
+                            "UPDATE reminders SET last_turn_id = ? WHERE note_id = ?",
+                            (turn_id, note["id"]),
+                        )
         return notifications, armed_note
 
     def reply(
@@ -227,7 +260,7 @@ class State:
             ).fetchone()
             if action is None or note is None:
                 self.connection.execute(
-                    "DELETE FROM interactions WHERE session_id = ?", (session_id,)
+                    "UPDATE interactions SET ready = 0 WHERE session_id = ?", (session_id,)
                 )
                 return None
             result = self._decode(note)
@@ -237,6 +270,7 @@ class State:
                 )
                 result["status"] = action
             if action != "more":
+                self.connection.execute("DELETE FROM reminders WHERE note_id = ?", (note["id"],))
                 self.connection.execute(
                     "DELETE FROM interactions WHERE session_id = ?", (session_id,)
                 )
@@ -270,6 +304,7 @@ class State:
                 "UPDATE notes SET status = ? WHERE id = ?", (status, identifier)
             )
             self.connection.execute("DELETE FROM interactions WHERE note_id = ?", (identifier,))
+            self.connection.execute("DELETE FROM reminders WHERE note_id = ?", (identifier,))
 
     def status(self) -> list[dict[str, Any]]:
         return [
