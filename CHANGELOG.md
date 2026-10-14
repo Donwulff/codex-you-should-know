@@ -2,9 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-14
+
+### Added
+
+- Added numbered reply hints: type `1` to read details, `2` to mark a note as known, `3` to dismiss it, or `4` to discuss it with the main agent, then press Enter. The original phrases still work.
+- Added `4: your message` to share the full note and your feedback after reading its details with `1`.
+
 ### Changed
 
 - Clarified the README with a two-step example for reading a note privately, then sharing its full context and optional feedback with the main agent.
+
+Restart Codex after updating to load the numbered replies. The four hook definitions are unchanged, and no terminal integration is required.
 
 ## [0.2.1] - 2026-10-14
 
@@ -45,7 +54,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/iliaal/codex-you-should-know/releases/tag/v0.2.0
 [0.1.1]: https://github.com/iliaal/codex-you-should-know/tree/3dee356fdd41ec0e8542862f094a09afbf1c07ba

@@ -332,19 +332,28 @@ def test_stop_delivers_background_finding_even_when_review_is_on_cooldown(
     assert not thread.is_alive()
     assert outcomes[0]["status"] == "finding"
     assert finding.summary in output["systemMessage"]
-    assert 'reply "tell me more"' in output["systemMessage"]
+    for option in (
+        "[1] Tell me more",
+        "[2] Already knew that",
+        "[3] Dismiss",
+        "[4] Chat in main session",
+    ):
+        assert option in output["systemMessage"]
     assert set(output) == {"systemMessage"}
     assert state.session("s").attempts == 1
     assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
-def test_organic_replies_need_no_skill_or_main_agent_context(state, finding, monkeypatch, capsys):
+@pytest.mark.parametrize("more,known", [("Tell me more!", "already knew that"), ("1", "2")])
+def test_organic_replies_need_no_skill_or_main_agent_context(
+    state, finding, monkeypatch, capsys, more, known
+):
     identifier = state.save("s", finding, 100, notify=True)
     state.deliver("s", ready=True, turn_id="finished-turn")
     event = {
         "session_id": "s",
         "hook_event_name": "UserPromptSubmit",
-        "prompt": "Tell me more!",
+        "prompt": more,
         "turn_id": "reply-turn",
     }
     details = run_hook(state, monkeypatch, capsys, event)
@@ -352,8 +361,9 @@ def test_organic_replies_need_no_skill_or_main_agent_context(state, finding, mon
     assert details["continue"] is False
     assert finding.explanation in details["systemMessage"]
     assert all(quote in details["systemMessage"] for quote in finding.evidence)
+    assert "[4] Chat in main session" in details["systemMessage"]
     assert "$you-should-know" not in details["systemMessage"]
-    event["prompt"] = "already knew that"
+    event["prompt"] = known
     confirmation = run_hook(state, monkeypatch, capsys, event)
     assert confirmation["continue"] is False
     assert "already known" in confirmation["systemMessage"]
@@ -361,13 +371,14 @@ def test_organic_replies_need_no_skill_or_main_agent_context(state, finding, mon
     assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
-def test_dismiss_reply_is_local_and_persistent(state, finding, monkeypatch, capsys):
+@pytest.mark.parametrize("prompt", ["dismiss", "3"])
+def test_dismiss_reply_is_local_and_persistent(state, finding, monkeypatch, capsys, prompt):
     identifier = state.save("s", finding, 100, notify=True)
     state.deliver("s", ready=True, turn_id="finished-turn")
     event = {
         "session_id": "s",
         "hook_event_name": "UserPromptSubmit",
-        "prompt": "dismiss",
+        "prompt": prompt,
         "turn_id": "reply-turn",
     }
     assert run_hook(state, monkeypatch, capsys, event)["continue"] is False
@@ -381,6 +392,8 @@ def test_dismiss_reply_is_local_and_persistent(state, finding, monkeypatch, caps
         "YSK CHAT!",
         "chat in main session: This was intentional; explain the tradeoff.",
         "ysk chat : Please preserve my feedback exactly.",
+        "4",
+        "4: This was intentional; explain the tradeoff.",
     ],
 )
 def test_chat_hands_only_selected_note_to_agent_and_allows_user_prompt(
@@ -441,6 +454,51 @@ def test_chat_cannot_share_other_sessions_or_active_turn_notes(
     assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
+def test_numbered_details_then_chat_shares_the_same_full_note(state, finding, monkeypatch, capsys):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "1",
+        "turn_id": "details-turn",
+    }
+    details = run_hook(state, monkeypatch, capsys, event)
+    assert details["continue"] is False
+    event.update(
+        prompt="4: This was intentional. Does the concern still apply?", turn_id="chat-turn"
+    )
+    handoff = run_hook(state, monkeypatch, capsys, event)
+    assert handoff["continue"] is True
+    context = handoff["hookSpecificOutput"]["additionalContext"]
+    shared = json.loads(context.split("\n\n", 1)[1])
+    assert shared == {"id": identifier, **finding.__dict__}
+    assert shared["explanation"] in details["systemMessage"]
+    assert all(quote in details["systemMessage"] for quote in shared["evidence"])
+    assert state.note(identifier)["status"] == "new"
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+@pytest.mark.parametrize("prompt", ["1", "2", "3", "4", "4: please discuss it"])
+@pytest.mark.parametrize(
+    "ready,turn_id", [(False, "next-turn"), (True, "finished-turn"), (True, None)]
+)
+def test_numbered_replies_pass_through_when_note_actions_are_inactive(
+    state, finding, monkeypatch, capsys, prompt, ready, turn_id
+):
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+        "turn_id": turn_id,
+    }
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=ready, turn_id="finished-turn")
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    assert state.note(identifier)["status"] == "new"
+
+
 @pytest.mark.parametrize(
     "prompt",
     [
@@ -451,6 +509,13 @@ def test_chat_cannot_share_other_sessions_or_active_turn_notes(
         None,
         "implement chat in main session",
         "chat in main session and fix it",
+        "0",
+        "5",
+        "12",
+        "1 more thing",
+        "1: please explain",
+        "2: already knew",
+        "3: dismiss this",
     ],
 )
 def test_ordinary_prompts_clear_reply_target_and_pass_through(

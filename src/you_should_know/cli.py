@@ -97,19 +97,27 @@ def hook_result(result: dict[str, Any]) -> dict[str, str]:
 
 
 REPLY_HINT = (
-    'After the turn ends, reply "tell me more", "already knew that", "dismiss", '
-    'or "chat in main session" for this note.'
+    "After the turn ends, reply with a number or phrase:\n"
+    "[1] Tell me more\n"
+    "[2] Already knew that\n"
+    "[3] Dismiss\n"
+    "[4] Chat in main session\n"
+    'To include feedback, reply "4: your message".'
 )
 REPLY_ACTIONS = {
+    "1": "more",
     "tell me more": "more",
     "learn more": "more",
     "ysk more": "more",
+    "2": "known",
     "already knew that": "known",
     "i already knew that": "known",
     "ysk known": "known",
+    "3": "dismissed",
     "dismiss": "dismissed",
     "dismiss that": "dismissed",
     "ysk dismiss": "dismissed",
+    "4": "chat",
     "chat in main session": "chat",
     "ysk chat": "chat",
 }
