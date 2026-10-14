@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-14
+
+### Added
+
+- Added `chat in main session` and `ysk chat` replies to share the selected note and its evidence with Codex without a note ID or skill command.
+- Added optional feedback after a colon, such as `chat in main session: This was intentional. Does the concern still apply?`, so the main agent receives the note and your request together.
+
+The handoff lets Codex respond normally and leaves the note's status unchanged. Other note replies remain local. Restart Codex after updating to load the new reply action; the four hook definitions are unchanged.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added
@@ -32,6 +41,7 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/iliaal/codex-you-should-know/releases/tag/v0.2.0
 [0.1.1]: https://github.com/iliaal/codex-you-should-know/tree/3dee356fdd41ec0e8542862f094a09afbf1c07ba

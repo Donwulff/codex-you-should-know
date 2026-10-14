@@ -95,7 +95,7 @@ def test_stop_arms_midturn_notification_without_repeating_summary(state):
     assert state.reply("session", "more", turn_id="reply-turn") == expected
 
 
-@pytest.mark.parametrize("action", ["more", "known", "dismissed"])
+@pytest.mark.parametrize("action", ["more", "known", "dismissed", "chat"])
 def test_midturn_reply_cannot_act_and_clears_target(state, action):
     identifier = state.save("session", finding(), 100, notify=True)
     state.deliver("session")
@@ -112,7 +112,7 @@ def test_ordinary_prompt_clears_ready_target_without_changing_note(state):
     assert state.note(identifier)["status"] == "new"
 
 
-@pytest.mark.parametrize("action", ["more", "known", "dismissed"])
+@pytest.mark.parametrize("action", ["more", "known", "dismissed", "chat"])
 def test_same_turn_steering_clears_target_without_consuming_action(state, action):
     identifier = state.save("session", finding(), 100, notify=True)
     state.deliver("session", ready=True, turn_id="active-turn")
@@ -163,6 +163,17 @@ def test_more_keeps_target_for_later_disposition(state):
     assert state.reply("session", "more", turn_id="reply-turn") == state.note(identifier)
     assert state.reply("session", "known", turn_id="reply-turn")["status"] == "known"
     assert state.reply("session", "more", turn_id="reply-turn") is None
+
+
+def test_chat_returns_note_and_ends_interaction_without_disposition(state):
+    identifier = state.save("session", finding(), 100, notify=True)
+    state.deliver("session", ready=True, turn_id="finished-turn")
+    expected = state.note(identifier)
+    assert state.reply("session", "more", turn_id="details-turn") == expected
+    assert state.reply("session", "chat", turn_id="chat-turn") == expected
+    assert state.note(identifier)["status"] == "new"
+    assert state.reply("session", "chat", turn_id="later-turn") is None
+    assert state.reply("session", "dismissed", turn_id="later-turn") is None
 
 
 @pytest.mark.parametrize("action", ["known", "dismissed"])

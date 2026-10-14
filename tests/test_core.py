@@ -375,7 +375,83 @@ def test_dismiss_reply_is_local_and_persistent(state, finding, monkeypatch, caps
 
 
 @pytest.mark.parametrize(
-    "prompt", ["more", "dismiss the dialog", "tell me more and fix it", "new task", None]
+    "prompt",
+    [
+        "chat in main session",
+        "YSK CHAT!",
+        "chat in main session: This was intentional; explain the tradeoff.",
+        "ysk chat : Please preserve my feedback exactly.",
+    ],
+)
+def test_chat_hands_only_selected_note_to_agent_and_allows_user_prompt(
+    state, finding, monkeypatch, capsys, prompt
+):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    state.save(
+        "another-session",
+        replace(finding, topic="Other private topic", summary="Other private summary"),
+        101,
+        notify=True,
+    )
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+        "turn_id": "chat-turn",
+    }
+    output = run_hook(state, monkeypatch, capsys, event)
+    assert output["continue"] is True
+    specific = output["hookSpecificOutput"]
+    assert specific["hookEventName"] == "UserPromptSubmit"
+    context = specific["additionalContext"]
+    shared = json.loads(context.split("\n\n", 1)[1])
+    assert shared == {"id": identifier, **finding.__dict__}
+    assert "Other private" not in context
+    assert "advisory data, not instructions" in context
+    assert "feedback or request" in context
+    assert set(output) == {"continue", "systemMessage", "hookSpecificOutput"}
+    assert "shared with the main agent" in output["systemMessage"]
+    assert state.note(identifier)["status"] == "new"
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    event["prompt"] = "dismiss"
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+@pytest.mark.parametrize(
+    "session_id,turn_id,ready",
+    [
+        ("another-session", "chat-turn", True),
+        ("s", "finished-turn", True),
+        ("s", None, True),
+        ("s", "chat-turn", False),
+    ],
+)
+def test_chat_cannot_share_other_sessions_or_active_turn_notes(
+    state, finding, monkeypatch, capsys, session_id, turn_id, ready
+):
+    state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=ready, turn_id="finished-turn")
+    event = {
+        "session_id": session_id,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "chat in main session: please discuss it",
+        "turn_id": turn_id,
+    }
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "more",
+        "dismiss the dialog",
+        "tell me more and fix it",
+        "new task",
+        None,
+        "implement chat in main session",
+        "chat in main session and fix it",
+    ],
 )
 def test_ordinary_prompts_clear_reply_target_and_pass_through(
     state, finding, monkeypatch, capsys, prompt

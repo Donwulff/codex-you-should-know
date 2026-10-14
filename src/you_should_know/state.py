@@ -213,7 +213,7 @@ class State:
     def reply(
         self, session_id: str, action: str | None, turn_id: str | None = None
     ) -> dict[str, Any] | None:
-        if action not in {None, "more", "known", "dismissed"}:
+        if action not in {None, "more", "known", "dismissed", "chat"}:
             raise ValueError("Invalid note action")
         with self._transaction():
             # A Stop hook can resume the same turn, whose steering must reach the agent.
@@ -231,14 +231,15 @@ class State:
                 )
                 return None
             result = self._decode(note)
-            if action != "more":
+            if action in {"known", "dismissed"}:
                 self.connection.execute(
                     "UPDATE notes SET status = ? WHERE id = ?", (action, note["id"])
                 )
+                result["status"] = action
+            if action != "more":
                 self.connection.execute(
                     "DELETE FROM interactions WHERE session_id = ?", (session_id,)
                 )
-                result["status"] = action
             return result
 
     def notes(self, all_notes: bool = False) -> list[dict[str, Any]]:

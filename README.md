@@ -4,7 +4,7 @@ Catch consequential oversights while Codex works. You Should Know runs an indepe
 
 For example, if you ask Codex to change one setting while preserving the others, and it replaces the entire settings file, the reviewer can flag the lost settings even when Codex claims the task succeeded.
 
-Inspired by Claude Code's `cc-plugin-you-should-know`. Alerts appear automatically in your conversation. At the end of the turn, you can reply **tell me more**, **already knew that**, or **dismiss**. You do not need to invoke a skill. Codex hooks support text replies instead of Claude's native alert buttons.
+Inspired by Claude Code's `cc-plugin-you-should-know`. Alerts appear automatically in your conversation. At the end of the turn, you can reply **tell me more**, **already knew that**, **dismiss**, or **chat in main session**. You do not need to invoke a skill. Codex hooks support text replies instead of Claude's native alert buttons.
 
 ## Install
 
@@ -70,7 +70,7 @@ The reviewer looks for consequential mistakes, overlooked constraints, and trade
 ```text
 You Should Know [8f31a7c62b40] · Your previous settings were deleted.
 
-After the turn ends, reply "tell me more", "already knew that", or "dismiss" for this note.
+After the turn ends, reply "tell me more", "already knew that", "dismiss", or "chat in main session" for this note.
 ```
 
 The reply options appear when the turn finishes. Send one of those replies as your whole message:
@@ -80,10 +80,19 @@ The reply options appear when the turn finishes. Send one of those replies as yo
 | `tell me more` | Display the explanation and supporting transcript quotes. |
 | `already knew that` | Mark the topic as known so it stays suppressed. |
 | `dismiss` | Dismiss the note and keep it out of future alerts. |
+| `chat in main session` | Share the note and its evidence with Codex so you can discuss it or request action. |
 
-These replies act on the most recent displayed note in the current session. Reading details leaves the reply options active. An ordinary task prompt ends that interaction; the plugin does not intercept later replies about an old note. Replies are inactive during work, so they cannot stop a running task. You can also use `ysk more`, `ysk known`, and `ysk dismiss` while the options are active.
+These replies act on the most recent displayed note in the current session. Reading details leaves the reply options active. An ordinary task prompt or a handoff to the main session ends that interaction; the plugin does not intercept later replies about an old note. Replies are inactive during work, so they cannot stop a running task. You can also use `ysk more`, `ysk known`, `ysk dismiss`, and `ysk chat` while the options are active.
 
-Codex displays a **Hook stopped** heading for a handled reply because the hook answers it locally and stops normal prompt processing. The note stays outside the main agent's context, and the agent does not act on it. Alerts themselves never stop the task.
+The first three replies are handled locally. Codex displays a **Hook stopped** heading because the hook answers the reply and stops normal prompt processing. The note stays outside the main agent's context until you choose to share it. Alerts themselves never stop the task.
+
+Choose **chat in main session** to hand the selected note to Codex. The agent receives its summary, explanation, and supporting transcript quotes, then responds normally. Sharing does not mark the note as known or dismissed. You can include feedback or a request after a colon:
+
+```text
+chat in main session: This was intentional. Does the concern still apply?
+```
+
+This reply does not stop the turn. Once the note is shared, continue the discussion normally; you do not need its ID or a skill command. Sharing a note alone does not ask Codex to change files, but you can include an explicit request to fix the issue.
 
 To revisit older notes or share one with the agent, use an ordinary request such as "Show my You Should Know notes" or "Explain You Should Know note 8f31a7c62b40." The bundled skill and command-line interface remain available for these requests.
 
