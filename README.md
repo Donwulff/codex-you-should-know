@@ -46,6 +46,10 @@ An empty check history is normal immediately after installation. After you finis
 
 ## Update
 
+See [CHANGELOG.md](CHANGELOG.md) for version history and upgrade notes.
+
+Exit Codex sessions using this plugin before updating. The updater can remove cached hook scripts that running sessions still reference.
+
 If you installed from GitHub, refresh the marketplace and install its current plugin version:
 
 ```sh
@@ -151,6 +155,8 @@ Checks retain the first three user messages and recent transcript activity withi
 | No notes appear after a successful check | The reviewer may have found nothing consequential, or the topic may already be in your note history. |
 
 ## Development
+
+Record user-visible changes under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). For a release, move those entries into a dated version section and use that section for the GitHub release notes.
 
 From a checkout, install the development tools with [uv](https://docs.astral.sh/uv/) and run the local checks:
 

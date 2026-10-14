@@ -1,0 +1,37 @@
+# Changelog
+
+## [Unreleased]
+
+## [0.2.0] - 2026-10-14
+
+### Added
+
+- Added the replies `tell me more`, `already knew that`, and `dismiss` for the latest displayed note after a turn ends, without invoking a skill or sharing the note with the main agent.
+- Preserved queued alerts when resuming the same session after a restart.
+- Added named hooks for displaying notes and handling replies.
+
+### Changed
+
+- Displayed completed background findings and check failures inline in the conversation instead of Codex's asynchronous warning UI.
+
+### Fixed
+
+- Delivered findings that finish while the end-of-turn hook waits for a background review, even when the cooldown prevents another check.
+
+### Upgrade
+
+Exit Codex sessions using this plugin before updating; the updater can remove cached hook scripts still used by those sessions. After updating, start or resume Codex and trust **You Should Know: display new notes** and **You Should Know: handle note replies** in `/hooks`. Existing notes and configuration are preserved; old notes are not replayed as new alerts.
+
+## [0.1.1] - 2026-10-14
+
+Initial public version.
+
+### Added
+
+- Added independent conversation reviews after tool use and at turn end, using existing Codex authentication.
+- Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
+- Named the review hooks in Codex's trust interface.
+
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/iliaal/codex-you-should-know/releases/tag/v0.2.0
+[0.1.1]: https://github.com/iliaal/codex-you-should-know/tree/3dee356fdd41ec0e8542862f094a09afbf1c07ba

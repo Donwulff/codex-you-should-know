@@ -14,6 +14,7 @@ FILES = (
     "scripts/you_should_know.py",
     "skills/you-should-know/SKILL.md",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
 )
 MARKER = ".you-should-know-package"
