@@ -66,12 +66,17 @@ def check(
                 timeout=max(1, config.timeout_seconds - (time.monotonic() - started)),
             )
             finding = parse_finding(response, transcript)
-            identifier = state.save(session_id, finding, time.time()) if finding else None
+            identifier = (
+                state.save(session_id, finding, time.time(), notify=not force) if finding else None
+            )
             state.finish(session_id, time.time(), digest)
         except (backend.BackendError, AssessmentError, TranscriptError) as error:
             detail = str(error)[:500]
             state.finish(session_id, time.time(), "", detail)
-            return {"status": "error", "error": detail, "notify": not session.last_error}
+            result = {"status": "error", "error": detail, "notify": not session.last_error}
+            if not force and result["notify"]:
+                state.queue_error(session_id, hook_result(result)["systemMessage"])
+            return result
         if identifier:
             return {"status": "finding", "note": state.note(identifier)}
         return {"status": "duplicate" if finding else "clear"}
@@ -80,20 +85,71 @@ def check(
 def hook_result(result: dict[str, Any]) -> dict[str, str]:
     if result["status"] == "finding":
         note = result["note"]
-        return {
-            "systemMessage": (
-                f"Heads up [{note['id']}] · {note['summary']}\n"
-                "Use $you-should-know:you-should-know to inspect or acknowledge this note."
-            )
-        }
+        return {"systemMessage": f"You Should Know [{note['id']}] · {note['summary']}"}
     if result["status"] == "error" and result.get("notify"):
         return {
             "systemMessage": (
                 f"You should know: a check failed. {result['error']}\n"
-                "Use $you-should-know:you-should-know status for details."
+                'Ask "You Should Know status" for details.'
             )
         }
     return {}
+
+
+REPLY_HINT = (
+    'After the turn ends, reply "tell me more", "already knew that", or "dismiss" for this note.'
+)
+REPLY_ACTIONS = {
+    "tell me more": "more",
+    "learn more": "more",
+    "ysk more": "more",
+    "already knew that": "known",
+    "i already knew that": "known",
+    "ysk known": "known",
+    "dismiss": "dismissed",
+    "dismiss that": "dismissed",
+    "ysk dismiss": "dismissed",
+}
+
+
+def notifications(
+    state: State, session_id: str, ready: bool = False, turn_id: str | None = None
+) -> dict[str, str]:
+    pending, active = state.deliver(session_id, ready, turn_id)
+    messages = []
+    shown = set()
+    for item in pending:
+        if "note" in item:
+            note = item["note"]
+            messages.append(hook_result({"status": "finding", "note": note})["systemMessage"])
+            shown.add(note["id"])
+        else:
+            messages.append(item["message"])
+    if active:
+        if active["id"] not in shown:
+            messages.append(hook_result({"status": "finding", "note": active})["systemMessage"])
+        messages.append(REPLY_HINT)
+    return {"systemMessage": "\n\n".join(messages)} if messages else {}
+
+
+def reply(state: State, session_id: str, prompt: Any, turn_id: str | None = None) -> dict[str, Any]:
+    text = (
+        " ".join(prompt.strip().casefold().split()).rstrip(".!?") if isinstance(prompt, str) else ""
+    )
+    action = REPLY_ACTIONS.get(text)
+    note = state.reply(session_id, action, turn_id)
+    if note is None:
+        return {}
+    if action == "more":
+        evidence = "\n".join(f"> {quote}" for quote in note["evidence"])
+        message = (
+            f"You Should Know [{note['id']}] · {note['summary']}\n\n"
+            f"{note['explanation']}\n\nTranscript evidence:\n{evidence}\n\n{REPLY_HINT}"
+        )
+    else:
+        disposition = "marked as already known" if action == "known" else "dismissed"
+        message = f"You Should Know [{note['id']}] {disposition}."
+    return {"continue": False, "systemMessage": message}
 
 
 def read_event() -> dict[str, Any]:
@@ -110,6 +166,9 @@ def read_event() -> dict[str, Any]:
     model = event.get("model")
     if model is not None and (not isinstance(model, str) or len(model) > 200):
         raise ValueError("Hook model must be a string")
+    turn_id = event.get("turn_id")
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id or len(turn_id) > 256):
+        raise ValueError("Hook turn_id must be a nonempty string")
     return event
 
 
@@ -120,6 +179,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--data-dir", help="Override the private local state directory")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("hook", help="Handle a Codex lifecycle event on stdin")
+    commands.add_parser("notify", help="Display queued notes from a synchronous Codex hook")
     notes = commands.add_parser("notes", help="List unread notes as JSON")
     notes.add_argument("--all", action="store_true", help="Include known and dismissed notes")
     for name, help_text in (
@@ -139,14 +199,14 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    is_hook = args.command == "hook"
+    is_hook = args.command in {"hook", "notify"}
     if is_hook and os.environ.get("YSK_REVIEWER_ACTIVE") == "1":
         print("{}")
         return 0
     state = None
     try:
         event = read_event() if is_hook else None
-        if event and event["hook_event_name"] not in {"PostToolUse", "Stop"}:
+        if event and event["hook_event_name"] not in {"PostToolUse", "Stop", "UserPromptSubmit"}:
             print("{}")
             return 0
         directory = data_directory(args.data_dir)
@@ -155,19 +215,26 @@ def main(argv: list[str] | None = None) -> int:
             print("{}")
             return 0
         state = State(directory)
-        if event:
+        if event and event["hook_event_name"] == "UserPromptSubmit":
+            output = reply(state, event["session_id"], event.get("prompt"), event.get("turn_id"))
+        elif event and args.command == "notify":
+            output = notifications(state, event["session_id"])
+        elif event:
             path = event.get("transcript_path")
             if not isinstance(path, str) or not path:
                 raise ValueError("Codex did not provide transcript_path; this check cannot run")
-            output = hook_result(
-                check(
-                    state,
-                    config,
-                    event["session_id"],
-                    Path(path),
-                    event["hook_event_name"],
-                    event.get("model"),
-                )
+            check(
+                state,
+                config,
+                event["session_id"],
+                Path(path),
+                event["hook_event_name"],
+                event.get("model"),
+            )
+            output = (
+                notifications(state, event["session_id"], ready=True, turn_id=event.get("turn_id"))
+                if event["hook_event_name"] == "Stop"
+                else {}
             )
         elif args.command == "check":
             output = check(state, config, args.session, args.transcript, "Stop", args.model, True)

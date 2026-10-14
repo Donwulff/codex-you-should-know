@@ -10,6 +10,24 @@
             "statusMessage": "You Should Know: review recent work",
             "async": true,
             "timeout": 120
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/you_should_know.py\" notify",
+            "statusMessage": "You Should Know: display new notes",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/you_should_know.py\" hook",
+            "statusMessage": "You Should Know: handle note replies",
+            "timeout": 10
           }
         ]
       }

@@ -265,6 +265,9 @@ def test_hook_protocol_and_cli_note_actions(state, transcript, finding, monkeypa
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
     prefix = ["--data-dir", str(state.directory)]
     assert main([*prefix, "hook"]) == 0
+    assert json.loads(capsys.readouterr().out) == {}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
+    assert main([*prefix, "notify"]) == 0
     warning = json.loads(capsys.readouterr().out)
     assert set(warning) == {"systemMessage"}
     assert finding.summary in warning["systemMessage"]
@@ -278,6 +281,164 @@ def test_hook_protocol_and_cli_note_actions(state, transcript, finding, monkeypa
     assert json.loads(capsys.readouterr().out)["status"] == "dismissed"
     assert main([*prefix, "status"]) == 0
     assert json.loads(capsys.readouterr().out)["sessions"][0]["attempts"] == 1
+
+
+def run_hook(state, monkeypatch, capsys, event, command="hook"):
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
+    assert main(["--data-dir", str(state.directory), command]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_stop_delivers_background_finding_even_when_review_is_on_cooldown(
+    state, transcript, finding, monkeypatch, capsys
+):
+    started, release = threading.Event(), threading.Event()
+
+    def reviewer(*args, **kwargs):
+        started.set()
+        assert release.wait(3)
+        return {"finding": finding.__dict__}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    (state.directory / "config.toml").write_text("every_n_tools = 1\n")
+    outcomes = []
+
+    def background():
+        worker = State(state.directory)
+        try:
+            outcomes.append(
+                check(worker, replace(Config(), every_n_tools=1), "s", transcript, "PostToolUse")
+            )
+        finally:
+            worker.close()
+
+    thread = threading.Thread(target=background)
+    thread.start()
+    assert started.wait(3)
+    timer = threading.Timer(0.1, release.set)
+    timer.start()
+    try:
+        event = {
+            "session_id": "s",
+            "hook_event_name": "Stop",
+            "transcript_path": str(transcript),
+            "turn_id": "finished-turn",
+        }
+        output = run_hook(state, monkeypatch, capsys, event)
+    finally:
+        release.set()
+        timer.join(3)
+        thread.join(3)
+    assert not thread.is_alive()
+    assert outcomes[0]["status"] == "finding"
+    assert finding.summary in output["systemMessage"]
+    assert 'reply "tell me more"' in output["systemMessage"]
+    assert set(output) == {"systemMessage"}
+    assert state.session("s").attempts == 1
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+def test_organic_replies_need_no_skill_or_main_agent_context(state, finding, monkeypatch, capsys):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Tell me more!",
+        "turn_id": "reply-turn",
+    }
+    details = run_hook(state, monkeypatch, capsys, event)
+    assert set(details) == {"continue", "systemMessage"}
+    assert details["continue"] is False
+    assert finding.explanation in details["systemMessage"]
+    assert all(quote in details["systemMessage"] for quote in finding.evidence)
+    assert "$you-should-know" not in details["systemMessage"]
+    event["prompt"] = "already knew that"
+    confirmation = run_hook(state, monkeypatch, capsys, event)
+    assert confirmation["continue"] is False
+    assert "already known" in confirmation["systemMessage"]
+    assert state.note(identifier)["status"] == "known"
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+def test_dismiss_reply_is_local_and_persistent(state, finding, monkeypatch, capsys):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "dismiss",
+        "turn_id": "reply-turn",
+    }
+    assert run_hook(state, monkeypatch, capsys, event)["continue"] is False
+    assert state.note(identifier)["status"] == "dismissed"
+
+
+@pytest.mark.parametrize(
+    "prompt", ["more", "dismiss the dialog", "tell me more and fix it", "new task", None]
+)
+def test_ordinary_prompts_clear_reply_target_and_pass_through(
+    state, finding, monkeypatch, capsys, prompt
+):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="finished-turn")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+        "turn_id": "reply-turn",
+    }
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    event["prompt"] = "dismiss"
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    assert state.note(identifier)["status"] == "new"
+
+
+def test_midturn_notification_has_no_action_until_stop(state, finding, monkeypatch, capsys):
+    state.save("s", finding, 100, notify=True)
+    event = {"session_id": "s", "hook_event_name": "PostToolUse"}
+    alert = run_hook(state, monkeypatch, capsys, event, "notify")
+    assert finding.summary in alert["systemMessage"]
+    assert "reply" not in alert["systemMessage"]
+    event.update(hook_event_name="UserPromptSubmit", prompt="dismiss")
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+
+
+@pytest.mark.parametrize("turn_id", ["continuing-turn", None])
+def test_stop_continuation_or_missing_turn_id_cannot_intercept_steering(
+    state, finding, monkeypatch, capsys, turn_id
+):
+    identifier = state.save("s", finding, 100, notify=True)
+    state.deliver("s", ready=True, turn_id="continuing-turn")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "dismiss",
+        "turn_id": turn_id,
+    }
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    assert state.note(identifier)["status"] == "new"
+
+
+def test_async_review_errors_are_delivered_once_by_synchronous_hook(
+    state, transcript, monkeypatch, capsys
+):
+    def reviewer(*args, **kwargs):
+        raise backend.BackendError("Review timed out")
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    (state.directory / "config.toml").write_text("every_n_tools = 1\n")
+    event = {
+        "session_id": "s",
+        "hook_event_name": "PostToolUse",
+        "transcript_path": str(transcript),
+    }
+    assert run_hook(state, monkeypatch, capsys, event) == {}
+    event["hook_event_name"] = "Stop"
+    output = run_hook(state, monkeypatch, capsys, event)
+    assert "Review timed out" in output["systemMessage"]
+    assert "reply" not in output["systemMessage"]
+    assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
 @pytest.mark.parametrize("raw", ["[]", "{}", '{"session_id":4}', "broken"])

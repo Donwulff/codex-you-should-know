@@ -7,6 +7,10 @@ description: Read, explain, acknowledge, or dismiss notes from the You Should Kn
 
 The installed skill name is `you-should-know:you-should-know`.
 
+Alerts and their immediate replies work automatically through hooks. Users do not need to invoke this skill to receive alerts, read their details, mark them as known, or dismiss them. At turn end, the latest displayed note offers the exact replies `tell me more`, `already knew that`, and `dismiss`. The reply hook handles those messages locally while the options remain active. An ordinary task prompt ends that interaction.
+
+Use this skill for requests to revisit older notes, inspect status, run a manual check, or share a note with the main agent. Natural requests such as "show my You Should Know notes" are sufficient; do not require the user to type the installed skill name.
+
 Resolve the plugin root as two directories above this skill directory. Run the plugin CLI with `python3 <plugin-root>/scripts/you_should_know.py`. Quote the resolved path. Do not assume the plugin root is the current working directory.
 
 Use the command that matches the request:

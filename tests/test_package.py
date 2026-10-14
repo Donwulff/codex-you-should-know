@@ -92,7 +92,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), "Existing user data")
 
     @unittest.skipUnless(shutil.which("codex"), "Codex CLI is required for native discovery")
-    def test_codex_discovers_both_installed_hooks(self):
+    def test_codex_discovers_all_installed_hooks(self):
         with tempfile.TemporaryDirectory(prefix="ysk native ") as temporary:
             temporary = Path(temporary)
             home = temporary / "home"
@@ -152,14 +152,20 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(discovery["errors"], [])
                     self.assertEqual(discovery["warnings"], [])
                     hooks = discovery["hooks"]
-                    self.assertEqual({hook["eventName"] for hook in hooks}, {"postToolUse", "stop"})
+                    self.assertEqual(len(hooks), 4)
+                    self.assertEqual(
+                        {hook["eventName"] for hook in hooks},
+                        {"postToolUse", "stop", "userPromptSubmit"},
+                    )
                     self.assertTrue(all(hook["enabled"] for hook in hooks))
                     self.assertTrue(all(hook["source"] == "plugin" for hook in hooks))
                     self.assertEqual(
-                        {hook["eventName"]: hook["statusMessage"] for hook in hooks},
+                        {(hook["eventName"], hook["statusMessage"]) for hook in hooks},
                         {
-                            "postToolUse": "You Should Know: review recent work",
-                            "stop": "You Should Know: review completed turn",
+                            ("postToolUse", "You Should Know: review recent work"),
+                            ("postToolUse", "You Should Know: display new notes"),
+                            ("stop", "You Should Know: review completed turn"),
+                            ("userPromptSubmit", "You Should Know: handle note replies"),
                         },
                     )
                 finally:
@@ -183,9 +189,14 @@ class PackageTests(unittest.TestCase):
             transcript = temporary / "rollout.jsonl"
             transcript.write_text("", encoding="utf-8")
             environment = dict(os.environ, PLUGIN_ROOT=str(plugin), YSK_DATA_DIR=str(data_dir))
-            for event, entries in hooks.items():
-                with self.subTest(event=event):
-                    command = entries[0]["hooks"][0]
+            commands = [
+                (event, command)
+                for event, entries in hooks.items()
+                for entry in entries
+                for command in entry["hooks"]
+            ]
+            for event, command in commands:
+                with self.subTest(event=event, command=command["command"]):
                     result = subprocess.run(
                         command["command"],
                         shell=True,
@@ -209,7 +220,9 @@ class PackageTests(unittest.TestCase):
                     output = json.loads(result.stdout) if result.stdout.strip() else {}
                     self.assertEqual(output, {})
             self.assertTrue(hooks["PostToolUse"][0]["hooks"][0]["async"])
+            self.assertFalse(hooks["PostToolUse"][0]["hooks"][1].get("async", False))
             self.assertFalse(hooks["Stop"][0]["hooks"][0].get("async", False))
+            self.assertFalse(hooks["UserPromptSubmit"][0]["hooks"][0].get("async", False))
 
 
 if __name__ == "__main__":

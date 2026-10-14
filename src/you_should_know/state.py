@@ -55,7 +55,27 @@ class State:
                 status TEXT NOT NULL DEFAULT 'new',
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                note_id TEXT,
+                message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS notifications_session
+                ON notifications(session_id, id);
+            CREATE TABLE IF NOT EXISTS interactions (
+                session_id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL,
+                ready INTEGER NOT NULL DEFAULT 0,
+                turn_id TEXT NOT NULL DEFAULT ''
+            );
         """)
+        with self._transaction():
+            columns = self.connection.execute("PRAGMA table_info(interactions)").fetchall()
+            if not any(column["name"] == "turn_id" for column in columns):
+                self.connection.execute(
+                    "ALTER TABLE interactions ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''"
+                )
 
     def close(self) -> None:
         self.connection.close()
@@ -109,9 +129,17 @@ class State:
             for row in rows
         ]
 
-    def save(self, session_id: str, finding: Finding, now: float) -> str | None:
-        key = hashlib.sha256(topic_key(finding.topic).encode()).hexdigest()[:12]
+    @contextlib.contextmanager
+    def _transaction(self) -> Generator[None]:
         with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            yield
+
+    def save(
+        self, session_id: str, finding: Finding, now: float, notify: bool = False
+    ) -> str | None:
+        key = hashlib.sha256(topic_key(finding.topic).encode()).hexdigest()[:12]
+        with self._transaction():
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO notes "
                 "(id, session_id, topic, summary, explanation, evidence, created_at) "
@@ -126,7 +154,92 @@ class State:
                     now,
                 ),
             )
+            if cursor.rowcount and notify:
+                self.connection.execute(
+                    "INSERT INTO notifications(session_id, note_id) VALUES (?, ?)",
+                    (session_id, key),
+                )
         return key if cursor.rowcount else None
+
+    def queue_error(self, session_id: str, message: str) -> None:
+        with self._transaction():
+            self.connection.execute(
+                "INSERT INTO notifications(session_id, message) VALUES (?, ?)",
+                (session_id, message),
+            )
+
+    def deliver(
+        self, session_id: str, ready: bool = False, turn_id: str | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        notifications = []
+        armed_note = None
+        with self._transaction():
+            rows = self.connection.execute(
+                "SELECT * FROM notifications WHERE session_id = ? ORDER BY id", (session_id,)
+            ).fetchall()
+            for row in rows:
+                if row["note_id"] is None:
+                    notifications.append({"message": row["message"]})
+                    continue
+                note = self.connection.execute(
+                    "SELECT * FROM notes WHERE id = ? AND status = 'new'", (row["note_id"],)
+                ).fetchone()
+                if note is None:
+                    continue
+                notifications.append({"note": self._decode(note)})
+                self.connection.execute(
+                    "INSERT INTO interactions(session_id, note_id, ready) VALUES (?, ?, 0) "
+                    "ON CONFLICT(session_id) DO UPDATE SET "
+                    "note_id = excluded.note_id, ready = 0, turn_id = ''",
+                    (session_id, note["id"]),
+                )
+            self.connection.execute("DELETE FROM notifications WHERE session_id = ?", (session_id,))
+            if ready and turn_id:
+                note = self.connection.execute(
+                    "SELECT notes.* FROM interactions "
+                    "JOIN notes ON notes.id = interactions.note_id "
+                    "WHERE interactions.session_id = ? AND interactions.ready = 0 "
+                    "AND notes.status = 'new'",
+                    (session_id,),
+                ).fetchone()
+                if note is not None:
+                    self.connection.execute(
+                        "UPDATE interactions SET ready = 1, turn_id = ? WHERE session_id = ?",
+                        (turn_id, session_id),
+                    )
+                    armed_note = self._decode(note)
+        return notifications, armed_note
+
+    def reply(
+        self, session_id: str, action: str | None, turn_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if action not in {None, "more", "known", "dismissed"}:
+            raise ValueError("Invalid note action")
+        with self._transaction():
+            # A Stop hook can resume the same turn, whose steering must reach the agent.
+            note = self.connection.execute(
+                "SELECT notes.* FROM interactions JOIN notes ON notes.id = interactions.note_id "
+                "WHERE interactions.session_id = ? AND interactions.ready = 1 "
+                "AND interactions.turn_id != '' AND interactions.turn_id != ? "
+                "AND ? != '' "
+                "AND notes.status = 'new'",
+                (session_id, turn_id, turn_id),
+            ).fetchone()
+            if action is None or note is None:
+                self.connection.execute(
+                    "DELETE FROM interactions WHERE session_id = ?", (session_id,)
+                )
+                return None
+            result = self._decode(note)
+            if action != "more":
+                self.connection.execute(
+                    "UPDATE notes SET status = ? WHERE id = ?", (action, note["id"])
+                )
+                self.connection.execute(
+                    "DELETE FROM interactions WHERE session_id = ?", (session_id,)
+                )
+                result["status"] = action
+            return result
 
     def notes(self, all_notes: bool = False) -> list[dict[str, Any]]:
         condition = "" if all_notes else "WHERE status = 'new'"
@@ -150,11 +263,12 @@ class State:
     def mark(self, identifier: str, status: str) -> None:
         if status not in {"known", "dismissed"}:
             raise ValueError("Invalid note status")
-        self.note(identifier)
-        with self.connection:
+        with self._transaction():
+            self.note(identifier)
             self.connection.execute(
                 "UPDATE notes SET status = ? WHERE id = ?", (status, identifier)
             )
+            self.connection.execute("DELETE FROM interactions WHERE note_id = ?", (identifier,))
 
     def status(self) -> list[dict[str, Any]]:
         return [
