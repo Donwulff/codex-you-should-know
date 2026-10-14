@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "finding": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "properties": {
+            "topic": {"type": "string"},
+            "summary": {"type": "string"},
+            "explanation": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["topic", "summary", "explanation", "evidence"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": ["finding"],
+  "additionalProperties": false
+}

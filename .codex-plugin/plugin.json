@@ -1,0 +1,14 @@
+{
+  "name": "you-should-know",
+  "version": "0.1.1",
+  "description": "Independent advisory checks for overlooked issues in Codex conversations.",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "You Should Know",
+    "shortDescription": "Catch consequential oversights",
+    "category": "Productivity",
+    "capabilities": ["Hooks", "Skills"],
+    "defaultPrompt": "Show my You Should Know notes."
+  }
+}

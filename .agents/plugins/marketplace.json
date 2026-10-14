@@ -1,0 +1,20 @@
+{
+  "name": "you-should-know",
+  "interface": {
+    "displayName": "You Should Know"
+  },
+  "plugins": [
+    {
+      "name": "you-should-know",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

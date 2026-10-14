@@ -1,0 +1,54 @@
+import os
+import tomllib
+from dataclasses import dataclass, fields
+from pathlib import Path
+
+
+class ConfigError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Config:
+    enabled: bool = True
+    every_n_tools: int = 6
+    min_interval_seconds: int = 120
+    max_checks_per_session: int = 30
+    timeout_seconds: int = 90
+    max_context_chars: int = 60_000
+    model: str | None = None
+
+
+def data_directory(override: str | None = None) -> Path:
+    if override or os.environ.get("YSK_DATA_DIR"):
+        return Path(override or os.environ["YSK_DATA_DIR"]).expanduser().resolve()
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "you-should-know"
+
+
+def load_config(directory: Path) -> Config:
+    path = directory / "config.toml"
+    if not path.exists():
+        return Config()
+    try:
+        with path.open("rb") as file:
+            data = tomllib.load(file)
+    except (OSError, ValueError) as error:
+        raise ConfigError(f"Cannot read {path}: {error}") from error
+    unknown = data.keys() - {field.name for field in fields(Config)}
+    if unknown:
+        raise ConfigError(f"Unknown configuration keys: {', '.join(sorted(unknown))}")
+    if "enabled" in data and type(data["enabled"]) is not bool:
+        raise ConfigError("enabled must be a boolean")
+    bounds = {
+        "every_n_tools": (1, 1000),
+        "min_interval_seconds": (0, 86_400),
+        "max_checks_per_session": (1, 1000),
+        "timeout_seconds": (1, 105),
+        "max_context_chars": (1000, 200_000),
+    }
+    for name, (minimum, maximum) in bounds.items():
+        if name in data and (type(data[name]) is not int or not minimum <= data[name] <= maximum):
+            raise ConfigError(f"{name} must be an integer between {minimum} and {maximum}")
+    if "model" in data and (not isinstance(data["model"], str) or not data["model"].strip()):
+        raise ConfigError("model must be a nonempty string")
+    return Config(**data)

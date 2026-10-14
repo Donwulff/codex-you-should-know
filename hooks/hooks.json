@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/you_should_know.py\" hook",
+            "statusMessage": "You Should Know: review recent work",
+            "async": true,
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/you_should_know.py\" hook",
+            "statusMessage": "You Should Know: review completed turn",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
