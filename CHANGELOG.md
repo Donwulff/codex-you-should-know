@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-15
+
 ### Changed
 
 - Held findings as hidden candidates until a separate confirmation checks subsequent conversation activity and the assistant's latest messages. Only unresolved, undisclosed concerns become notes. Confirmation runs at the next eligible check or at turn end and adds one model call per candidate.
@@ -121,7 +123,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.3...v0.2.4

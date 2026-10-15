@@ -1,6 +1,6 @@
 [project]
 name = "codex-you-should-know"
-version = "0.2.6"
+version = "0.3.0"
 description = "Independent advisory checks for Codex conversations."
 license = "MIT"
 license-files = ["LICENSE"]
