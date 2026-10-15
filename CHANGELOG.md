@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-15
+
+### Changed
+
+- Disabled automatic reviews, notifications, and note replies in identified local `codex exec`, `codex e`, `codex exec resume`, and `codex review` runs. These clients do not display note text; skipped hooks use no reviewer tokens or check attempts and preserve pending alerts.
+- Added detection of the currently running Codex command on Linux, WSL, and macOS so interactive resumes remain eligible regardless of the thread's original source. Explicit manual checks still work in noninteractive runs. Unknown clients or unavailable process information retain automatic checks.
+
+Restart Codex after updating. The four hook definitions and existing notes are unchanged. The 30-attempt session limit and reminder lifecycle are unchanged in this release.
+
 ## [0.2.5] - 2026-10-14
 
 ### Changed
@@ -80,7 +89,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.2...v0.2.3

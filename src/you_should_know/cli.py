@@ -12,6 +12,7 @@ from typing import Any
 from . import backend
 from .assessment import AssessmentError, make_prompt, parse_finding
 from .config import Config, ConfigError, data_directory, load_config
+from .host import noninteractive_host
 from .state import Session, State, review_lock
 from .transcript import TranscriptError, read_transcript
 
@@ -250,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         event = read_event() if is_hook else None
         if event and event["hook_event_name"] not in {"PostToolUse", "Stop", "UserPromptSubmit"}:
+            print("{}")
+            return 0
+        if event and noninteractive_host():
             print("{}")
             return 0
         directory = data_directory(args.data_dir)

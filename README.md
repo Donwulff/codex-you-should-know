@@ -63,6 +63,10 @@ Start a new session after updating. Review and trust any new or modified definit
 
 Continue working in Codex. After six completed tools, the plugin can start a background check. Completed findings appear in the conversation after a subsequent tool or at turn end. The end-of-turn hook waits for an outstanding review and displays its findings even when the review cooldown prevents another check. A final check also covers turns without tools.
 
+Automatic hooks skip local `codex exec` (including `codex e` and `codex exec resume`) and `codex review` runs when the current process identifies them. These clients do not display the plugin's note text. Skipped hooks make no reviewer requests, spend no check attempts, and leave pending notes untouched. Explicit manual checks remain available in these runs.
+
+Detection uses the current Codex process on Linux, WSL, and macOS. A thread created by `exec` can receive automatic checks when resumed interactively. Unrecognized clients, shared app servers, unreadable process information, and unfamiliar command-line options retain automatic checks. Put image arguments after the subcommand, as in `codex exec --image picture.png`, for reliable detection.
+
 Automatic checks are at least 120 seconds apart and limited to 30 attempts over a session's lifetime, including resumed sessions. Unchanged excerpts do not trigger another model request. A final check or an outstanding background check can delay completion while the reviewer finishes. Queued findings survive a restart and can appear when you resume the same session.
 
 The reviewer looks for consequential mistakes, overlooked constraints, and tradeoffs supported by the transcript. It can return no note. An alert looks like this:
@@ -161,7 +165,7 @@ python3 scripts/you_should_know.py status
 
 The identifier `8f31a7c62b40` is illustrative; replace it with an identifier from `notes`. The list contains up to 100 recent open notes, or 100 notes of any status with `--all`. Reading a note leaves its status unchanged.
 
-To request a check immediately, supply a Codex rollout transcript and session identifier. Manual checks bypass the tool cadence, cooldown, and session attempt limit:
+To request a check immediately, supply a Codex rollout transcript and session identifier. Manual checks work inside noninteractive sessions and bypass the tool cadence, cooldown, and session attempt limit:
 
 ```sh
 python3 scripts/you_should_know.py check --transcript /path/to/rollout.jsonl --session my-check
@@ -201,6 +205,7 @@ Checks retain the first three user messages and recent transcript activity withi
 | `codex plugin` or `/hooks` is unavailable | Update Codex to a version with plugin and hook support. This project was tested with CLI 0.162.1. |
 | The skill does not appear | Start a new Codex session after installation. Use the full name `$you-should-know:you-should-know`. |
 | Hooks are installed but no checks run | Open `/hooks` and confirm all four plugin hooks are enabled and trusted. Check that the plugin's `enabled` setting is `true`. |
+| No automatic checks run under `codex exec` or `codex review` | These runs skip automatic hooks. Use an explicit manual check if you need a review. |
 | A note reply reaches the main agent | Confirm the reply hook is trusted, wait for the reply options at turn end, and send an exact whole-message reply before another task prompt. |
 | A hook is marked **modified** after an update | Review and trust the new definition through `/hooks`. |
 | A check reports an authentication failure | Run `codex login`, then try another check. |

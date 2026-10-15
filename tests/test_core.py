@@ -6,11 +6,16 @@ from dataclasses import replace
 
 import pytest
 
-from you_should_know import backend
+from you_should_know import backend, host
 from you_should_know.assessment import Finding
 from you_should_know.cli import check, eligible, hook_result, main
 from you_should_know.config import Config, ConfigError, data_directory, load_config
 from you_should_know.state import State, review_lock
+
+
+@pytest.fixture(autouse=True)
+def interactive_host(monkeypatch):
+    monkeypatch.setattr(host, "process_info", lambda pid: (1, "/bin/codex", ["codex"]))
 
 
 @pytest.fixture
@@ -70,6 +75,117 @@ def test_cadence_cooldown_stop_and_limit(state):
     assert not eligible(session, replace(config, max_checks_per_session=1), "Stop", 2000, False)
     assert eligible(session, config, "Stop", 1001, True)
     assert not eligible(session, replace(config, enabled=False), "Stop", 2000, True)
+
+
+@pytest.mark.parametrize(
+    "command,event",
+    [
+        ("hook", "Stop"),
+        ("hook", "PostToolUse"),
+        ("hook", "UserPromptSubmit"),
+        ("notify", "PostToolUse"),
+    ],
+)
+def test_exec_automatic_check_does_not_create_state(
+    tmp_path, transcript, monkeypatch, capsys, command, event
+):
+    directory = tmp_path / "unused-exec-state"
+    monkeypatch.setattr(host, "process_info", lambda pid: (1, "/bin/codex", ["codex", "exec"]))
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": None})
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "session_id": "headless",
+                    "hook_event_name": event,
+                    "transcript_path": str(transcript),
+                }
+            )
+        ),
+    )
+    assert main(["--data-dir", str(directory), command]) == 0
+    assert json.loads(capsys.readouterr().out) == {}
+    assert not directory.exists()
+
+
+def test_exec_does_not_consume_pending_notes(state, transcript, finding, monkeypatch, capsys):
+    identifier = state.save("resumed", finding, 100, notify=True)
+    monkeypatch.setattr(
+        host, "process_info", lambda pid: (1, "/bin/codex", ["codex", "exec", "resume"])
+    )
+    output = run_hook(
+        state,
+        monkeypatch,
+        capsys,
+        {
+            "session_id": "resumed",
+            "hook_event_name": "Stop",
+            "turn_id": "headless-turn",
+            "transcript_path": str(transcript),
+        },
+    )
+    assert output == {}
+    pending, active = state.deliver("resumed", ready=True, turn_id="interactive-turn")
+    assert any(item.get("note", {}).get("id") == identifier for item in pending)
+    assert active["id"] == identifier
+
+
+@pytest.mark.parametrize(
+    "source", ["exec", {"subagent": {"thread_spawn": {"parent_thread_id": "p"}}}]
+)
+def test_interactive_resume_reviews_despite_historical_source(
+    state, transcript, monkeypatch, capsys, source
+):
+    transcript.write_text(
+        json.dumps({"type": "session_meta", "payload": {"source": source}})
+        + "\n"
+        + transcript.read_text()
+    )
+    monkeypatch.setenv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "codex_exec")
+    monkeypatch.setattr(
+        host, "process_info", lambda pid: (1, "/bin/codex", ["codex", "resume", "s"])
+    )
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": None})
+    assert (
+        run_hook(
+            state,
+            monkeypatch,
+            capsys,
+            {
+                "session_id": "s",
+                "hook_event_name": "Stop",
+                "agent_id": "historical-child",
+                "transcript_path": str(transcript),
+            },
+        )
+        == {}
+    )
+    assert state.session("s").last_success > 0
+    assert state.session("s").attempts == 1
+
+
+def test_manual_check_still_reviews_inside_exec(state, transcript, finding, monkeypatch, capsys):
+    monkeypatch.setattr(host, "process_info", lambda pid: (1, "/bin/codex", ["codex", "exec"]))
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": finding.__dict__})
+    assert (
+        main(
+            [
+                "--data-dir",
+                str(state.directory),
+                "check",
+                "--session",
+                "explicit",
+                "--transcript",
+                str(transcript),
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "finding"
+    assert result["note"]["summary"] == finding.summary
+    assert state.session("explicit").attempts == 1
 
 
 def test_manual_check_saves_validated_note_and_survives_reopen(
