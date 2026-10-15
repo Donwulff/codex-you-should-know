@@ -78,6 +78,12 @@ class BackendError(RuntimeError):
     """A bounded, non-sensitive error safe to show in hook diagnostics."""
 
 
+class ReviewResponse(dict[str, Any]):
+    def __init__(self, response: dict[str, Any], usage: dict[str, int]) -> None:
+        super().__init__(response)
+        self.usage = usage
+
+
 def _terminate(signum: int, _frame: FrameType | None) -> None:
     raise SystemExit(128 + signum)
 
@@ -135,7 +141,7 @@ def _failure(error: object) -> str:
     return "Codex review failed without a recognized cause; check Codex CLI diagnostics"
 
 
-def _event(line: bytes) -> tuple[bool, str | None]:
+def _event(line: bytes, usage: dict[str, int] | None = None) -> tuple[bool, str | None]:
     try:
         event = json.loads(line)
     except (UnicodeError, ValueError) as exc:
@@ -157,16 +163,24 @@ def _event(line: bytes) -> tuple[bool, str | None]:
             raise BackendError("Codex attempted tool use; review discarded")
     elif kind not in {"thread.started", "turn.started", "turn.completed"}:
         raise BackendError("Codex returned an unsupported event")
+    if kind == "turn.completed" and usage is not None:
+        reported = event.get("usage")
+        if isinstance(reported, dict):
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                value = reported.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    usage[key] = usage.get(key, 0) + value
     return kind == "turn.completed", None
 
 
-def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> None:
+def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> dict[str, int]:
     environment = {key: value for key, value in os.environ.items() if key in _ENVIRONMENT}
     environment["YSK_REVIEWER_ACTIVE"] = "1"
     pending = bytearray()
     total = 0
     completed = False
     last_error = None
+    usage: dict[str, int] = {}
     deadline = time.monotonic() + timeout
     with tempfile.TemporaryFile() as input_file:
         input_file.write(prompt)
@@ -211,11 +225,11 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
                                 line, _, rest = pending.partition(b"\n")
                                 pending = bytearray(rest)
                                 if line.strip():
-                                    finished, diagnostic = _event(bytes(line))
+                                    finished, diagnostic = _event(bytes(line), usage)
                                     completed = finished or completed
                                     last_error = diagnostic or last_error
                 if pending.strip():
-                    finished, diagnostic = _event(bytes(pending))
+                    finished, diagnostic = _event(bytes(pending), usage)
                     completed = finished or completed
                     last_error = diagnostic or last_error
                 try:
@@ -234,6 +248,7 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
             finally:
                 if previous_sigterm is not None:
                     signal.signal(signal.SIGTERM, previous_sigterm)
+    return usage
 
 
 def review(
@@ -241,7 +256,7 @@ def review(
     schema_path: Path,
     model: str | None = None,
     timeout: float = 60.0,
-) -> dict[str, Any]:
+) -> ReviewResponse:
     """Run an independent restricted CLI review; the caller validates its schema."""
     if not math.isfinite(timeout) or timeout <= 0:
         raise BackendError("Review timeout must be positive and finite")
@@ -285,7 +300,7 @@ def review(
         if model:
             command.extend(("--model", model))
         command.append("-")
-        _run(command, encoded, workspace, timeout)
+        usage = _run(command, encoded, workspace, timeout)
         try:
             with output.open("rb") as result_file:
                 raw = result_file.read(MAX_RESULT_BYTES + 1)
@@ -296,4 +311,4 @@ def review(
             raise BackendError("Codex returned no valid JSON review") from exc
         if not isinstance(result, dict):
             raise BackendError("Codex review must be a JSON object")
-        return result
+        return ReviewResponse(result, usage)

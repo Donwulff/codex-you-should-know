@@ -10,9 +10,11 @@
             "topic": {"type": "string"},
             "summary": {"type": "string"},
             "explanation": {"type": "string"},
-            "evidence": {"type": "array", "items": {"type": "string"}}
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "agent_still_working": {"type": "boolean"},
+            "assistant_claim": {"type": "boolean"}
           },
-          "required": ["topic", "summary", "explanation", "evidence"],
+          "required": ["topic", "summary", "explanation", "evidence", "agent_still_working", "assistant_claim"],
           "additionalProperties": false
         }
       ]

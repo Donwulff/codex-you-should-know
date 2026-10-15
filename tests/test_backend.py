@@ -118,6 +118,36 @@ class BackendTests(unittest.TestCase):
         with self.assertRaisesRegex(BackendError, "did not complete"):
             review("test", self.schema, timeout=5)
 
+    def test_collects_completed_turn_usage_without_changing_result_keys(self) -> None:
+        self.cli(
+            """
+            out.write_text('{"finding":null}')
+            print(json.dumps({'type':'turn.completed','usage': {
+                'input_tokens':120, 'cached_input_tokens':80, 'output_tokens':15}}))
+            """
+        )
+        result = review("test", self.schema, timeout=5)
+        self.assertEqual(result, {"finding": None})
+        self.assertEqual(
+            result.usage, {"input_tokens": 120, "cached_input_tokens": 80, "output_tokens": 15}
+        )
+
+    def test_usage_handles_absent_and_malformed_counters(self) -> None:
+        for usage, expected in (
+            (None, {}),
+            ({"input_tokens": True, "cached_input_tokens": -1, "output_tokens": "9"}, {}),
+            (
+                {"input_tokens": 0, "output_tokens": 9, "private_field": 10},
+                {"input_tokens": 0, "output_tokens": 9},
+            ),
+        ):
+            with self.subTest(usage=usage):
+                self.cli(
+                    "out.write_text('{\"finding\":null}')\n"
+                    f"sys.stdout.write(json.dumps({{'type':'turn.completed','usage':{usage!r}}}))"
+                )
+                self.assertEqual(review("test", self.schema, timeout=5).usage, expected)
+
     def test_nonfatal_warning_items_allow_completed_review(self) -> None:
         self.cli(
             """

@@ -11,6 +11,7 @@ FILES = (
     ".codex-plugin/plugin.json",
     "hooks/hooks.json",
     "resources/finding.schema.json",
+    "resources/confirmation.schema.json",
     "scripts/you_should_know.py",
     "skills/you-should-know/SKILL.md",
     "README.md",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,6 +22,7 @@ _ROLLOUT_TYPES = {
     "inter_agent_communication_metadata",
     "token_usage_record",
 }
+_FRAME = re.compile(r"^\[([^\n\]]+); chars=(\d+)\]\n", re.MULTILINE)
 
 
 class TranscriptError(ValueError):
@@ -37,15 +39,58 @@ def _clip(text: str, limit: int) -> str:
     return text[:start] + _TRUNCATED + text[-(remaining - start) :]
 
 
-def _records(stream: BinaryIO) -> Iterator[tuple[dict | None, str | None]]:
+def source_blocks(text: str) -> Iterator[tuple[str, str]]:
+    """Read length-framed sources without interpreting labels inside their text."""
+    offset = 0
+    while match := _FRAME.search(text, offset):
+        end = match.end() + int(match[2])
+        if end > len(text):
+            return
+        yield match[1], text[match.end() : end]
+        offset = end
+
+
+def frame(label: str, text: str) -> str:
+    label = label.replace("\n", " ").replace("\r", " ").replace("]", "")
+    return f"[{label}; chars={len(text)}]\n{text}"
+
+
+def _clip_block(block: str, limit: int) -> str:
+    if len(block) <= limit:
+        return block
+    match = _FRAME.match(block)
+    if match is None:
+        return _clip(block, limit)
+    label, text = match[1], block[match.end() :]
+    budget = limit - len(frame(label, "")) - len(str(len(text))) + 1
+    if budget < 1:
+        return _clip("[Content omitted]", max(1, limit))
+    return frame(label, _clip(text, budget))
+
+
+def _records(
+    stream: BinaryIO, *, complete_only: bool = False
+) -> Iterator[tuple[dict | None, str | None]]:
     line_number = 0
-    while raw := stream.readline(_MAX_LINE_BYTES + 1):
+    while True:
+        start = stream.tell()
+        raw = stream.readline(_MAX_LINE_BYTES + 1)
+        if not raw:
+            return
         line_number += 1
         if len(raw) > _MAX_LINE_BYTES:
             while raw and not raw.endswith(b"\n"):
                 raw = stream.readline(_MAX_LINE_BYTES + 1)
+            if complete_only and not raw.endswith(b"\n"):
+                stream.seek(start)
+                yield None, "[Incomplete final transcript record omitted]"
+                return
             yield None, "[Oversized transcript record omitted]"
             continue
+        if complete_only and not raw.endswith(b"\n"):
+            stream.seek(start)
+            yield None, "[Incomplete final transcript record omitted]"
+            return
         if not raw.strip():
             continue
         try:
@@ -87,7 +132,7 @@ def _visible_item(payload: dict) -> tuple[str, bool] | None:
         if "content" not in payload:
             raise TranscriptError("Transcript message is missing its content field")
         text = _text_content(payload["content"])
-        return (f"[{role}]\n{text}", role == "user") if text else None
+        return (frame(role, text), role == "user") if text else None
     if kind in {"function_call", "custom_tool_call"}:
         field = "arguments" if kind == "function_call" else "input"
         name = payload.get("name")
@@ -95,17 +140,19 @@ def _visible_item(payload: dict) -> tuple[str, bool] | None:
             raise TranscriptError("Transcript tool call is missing its name or input")
         text = _text_content(payload[field])
         call_id = payload.get("call_id", "unknown")
-        return f"[tool call: {name}; id={call_id}]\n{text}", False
+        return frame(f"tool call: {name}; id={call_id}", text), False
     if kind in {"function_call_output", "custom_tool_call_output"}:
         if "output" not in payload:
             raise TranscriptError("Transcript tool result is missing its output field")
         text = _text_content(payload["output"])
         call_id = payload.get("call_id", "unknown")
-        return (f"[tool result: id={call_id}]\n{text}", False) if text else None
+        return (frame(f"tool result: id={call_id}", text), False) if text else None
     return None
 
 
-def read_transcript(path: Path, max_chars: int = 60_000) -> str:
+def _read(
+    path: Path, max_chars: int, *, offset: int = 0, complete_only: bool = False
+) -> tuple[str, int]:
     """Return visible text, retaining the first three user messages and recent work.
 
     A metadata-only rollout is valid empty history. Missing files, empty files,
@@ -118,11 +165,12 @@ def read_transcript(path: Path, max_chars: int = 60_000) -> str:
     total = 0
     initial: list[tuple[int, str]] = []
     omitted = False
-    recognized = False
+    recognized = offset > 0
     sequence = 0
     try:
         with path.open("rb") as stream:
-            for row, marker in _records(stream):
+            stream.seek(offset)
+            for row, marker in _records(stream, complete_only=complete_only):
                 user = False
                 if row is None:
                     block = marker or ""
@@ -148,14 +196,15 @@ def read_transcript(path: Path, max_chars: int = 60_000) -> str:
                     block, user = visible
                 sequence += 1
                 if user and len(initial) < 3:
-                    initial.append((sequence, _clip(block, max_chars // 3)))
-                block = _clip(block, max_chars - 2)
+                    initial.append((sequence, _clip_block(block, max_chars // 3)))
+                block = _clip_block(block, max_chars - 2)
                 recent.append((sequence, block))
                 total += len(block) + 2
                 while total > max_chars and len(recent) > 1:
                     _, removed = recent.popleft()
                     total -= len(removed) + 2
                     omitted = True
+            cursor = stream.tell()
     except OSError as exc:
         raise TranscriptError(
             f"Cannot read transcript: {exc.strerror or type(exc).__name__}"
@@ -163,12 +212,13 @@ def read_transcript(path: Path, max_chars: int = 60_000) -> str:
     if not recognized:
         raise TranscriptError("Empty or unsupported transcript; expected a Codex JSONL rollout")
     if not omitted:
-        return "\n\n".join(block for _, block in recent)
+        return "\n\n".join(block for _, block in recent), cursor
     prefix = ""
     if initial:
         per_message_budget = (max_chars // 3 - 2 * (len(initial) - 1)) // len(initial)
         prefix = "[Initial user messages]\n"
-        prefix += "\n\n".join(_clip(block, per_message_budget) for _, block in initial) + "\n\n"
+        prefix += "\n\n".join(_clip_block(block, per_message_budget) for _, block in initial)
+        prefix += "\n\n"
         initial_indexes = {index for index, _ in initial}
         recent = deque((index, block) for index, block in recent if index not in initial_indexes)
     prefix += _OMITTED + "\n\n"
@@ -177,5 +227,51 @@ def read_transcript(path: Path, max_chars: int = 60_000) -> str:
     while len(recent) > 1 and total > budget:
         _, removed = recent.popleft()
         total -= len(removed) + 2
-    tail = "\n\n".join(block for _, block in recent)
-    return prefix + _clip(tail, budget)
+    if len(recent) == 1:
+        tail = _clip_block(recent[0][1], budget)
+    else:
+        tail = "\n\n".join(block for _, block in recent)
+    return prefix + tail, cursor
+
+
+def read_transcript(path: Path, max_chars: int = 60_000) -> str:
+    return _read(path, max_chars)[0]
+
+
+def read_snapshot(path: Path, max_chars: int = 60_000) -> tuple[str, int]:
+    """Return visible complete JSONL records and the byte cursor after them."""
+    return _read(path, max_chars, complete_only=True)
+
+
+def read_since(path: Path, offset: int, max_chars: int = 60_000) -> str:
+    return read_since_snapshot(path, offset, max_chars)[0]
+
+
+def read_since_snapshot(path: Path, offset: int, max_chars: int = 60_000) -> tuple[str, int]:
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a nonnegative integer")
+    try:
+        if path.stat().st_size < offset:
+            return "[Transcript was truncated; subsequent context is unavailable]", offset
+    except OSError as exc:
+        raise TranscriptError(f"Cannot read transcript: {exc.strerror}") from exc
+    return _read(path, max_chars, offset=offset, complete_only=True)
+
+
+def last_assistant_message(path: Path) -> str:
+    latest = ""
+    try:
+        with path.open("rb") as stream:
+            for row, _ in _records(stream, complete_only=True):
+                if row is None or row.get("type") != "response_item":
+                    continue
+                payload = row.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("type") == "message" and payload.get("role") == "assistant":
+                    visible = _visible_item(payload)
+                    if visible:
+                        latest = next(source_blocks(visible[0]))[1]
+    except OSError as exc:
+        raise TranscriptError(f"Cannot read transcript: {exc.strerror}") from exc
+    return latest

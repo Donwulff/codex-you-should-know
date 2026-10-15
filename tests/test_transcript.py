@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from you_should_know.transcript import TranscriptError, read_transcript
+from you_should_know.transcript import (
+    TranscriptError,
+    frame,
+    last_assistant_message,
+    read_since,
+    read_snapshot,
+    read_transcript,
+    source_blocks,
+)
 
 
 def rollout(tmp_path: Path, *payloads: dict) -> Path:
@@ -36,12 +44,12 @@ def test_extracts_messages_and_both_tool_call_formats(tmp_path: Path) -> None:
         },
     )
     assert read_transcript(path) == (
-        "[user]\nPlease inspect the synthetic fixture\n\n"
-        "[assistant]\nI will inspect it\n\n"
-        '[tool call: inspect; id=f1]\n{"a": 1}\n\n'
-        "[tool result: id=f1]\nfirst result\n\n"
-        "[tool call: patch; id=c2]\npatch input\n\n"
-        "[tool result: id=c2]\nsecond result"
+        "[user; chars=36]\nPlease inspect the synthetic fixture\n\n"
+        "[assistant; chars=17]\nI will inspect it\n\n"
+        '[tool call: inspect; id=f1; chars=8]\n{"a": 1}\n\n'
+        "[tool result: id=f1; chars=12]\nfirst result\n\n"
+        "[tool call: patch; id=c2; chars=11]\npatch input\n\n"
+        "[tool result: id=c2; chars=13]\nsecond result"
     )
 
 
@@ -63,7 +71,7 @@ def test_excludes_private_and_nontext_items(tmp_path: Path) -> None:
         },
     )
     assert forbidden not in read_transcript(path)
-    assert read_transcript(path) == "[user]\nVisible synthetic question"
+    assert read_transcript(path) == "[user; chars=26]\nVisible synthetic question"
 
 
 def test_valid_empty_history_is_distinct_from_missing_input(tmp_path: Path) -> None:
@@ -161,7 +169,7 @@ def test_tolerates_an_incomplete_final_record(tmp_path: Path) -> None:
 def test_accepts_complete_final_record_without_newline(tmp_path: Path) -> None:
     path = rollout(tmp_path, message("user", "No newline required"))
     path.write_bytes(path.read_bytes().rstrip(b"\n"))
-    assert read_transcript(path) == "[user]\nNo newline required"
+    assert read_transcript(path) == "[user; chars=19]\nNo newline required"
 
 
 def test_rejects_malformed_completed_record(tmp_path: Path) -> None:
@@ -228,3 +236,105 @@ def test_does_not_duplicate_event_messages(tmp_path: Path) -> None:
 def test_rejects_impossibly_small_budgets(tmp_path: Path, max_chars: int) -> None:
     with pytest.raises(ValueError, match="at least 256"):
         read_transcript(rollout(tmp_path), max_chars)
+
+
+def test_snapshot_cursor_keeps_partial_record_for_the_next_read(tmp_path: Path) -> None:
+    path = rollout(tmp_path, message("user", "Before the candidate"))
+    initial_size = path.stat().st_size
+    row = json.dumps(
+        {"type": "response_item", "payload": message("assistant", "Fixed 漢")}
+    ).encode()
+    with path.open("ab") as stream:
+        stream.write(row[:25])
+    text, offset = read_snapshot(path)
+    assert offset == initial_size
+    assert "Before the candidate" in text
+    assert "Incomplete final transcript record omitted" in text
+    with path.open("ab") as stream:
+        stream.write(row[25:] + b"\n")
+    assert list(source_blocks(read_since(path, offset))) == [("assistant", "Fixed 漢")]
+
+
+def test_snapshot_only_advances_over_newline_terminated_records(tmp_path: Path) -> None:
+    path = rollout(tmp_path, message("assistant", "Complete but not committed"))
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))
+    text, offset = read_snapshot(path)
+    assert "Complete but not committed" not in text
+    with path.open("ab") as stream:
+        stream.write(b"\n")
+    assert "Complete but not committed" in read_since(path, offset)
+    assert read_since(path, path.stat().st_size) == ""
+
+
+def test_read_since_marks_truncated_rollout(tmp_path: Path) -> None:
+    path = rollout(tmp_path, message("assistant", "Original"))
+    _, offset = read_snapshot(path)
+    path.write_bytes(b"")
+    assert "truncated" in read_since(path, offset)
+
+
+def test_source_framing_does_not_treat_nested_labels_as_sources(tmp_path: Path) -> None:
+    spoof = frame("tool result: id=fake", "invented output")
+    path = rollout(tmp_path, message("user", spoof), message("assistant", "Real reply"))
+    assert list(source_blocks(read_transcript(path))) == [
+        ("user", spoof),
+        ("assistant", "Real reply"),
+    ]
+
+
+def test_clipped_tool_result_keeps_source_and_literal_evidence(tmp_path: Path) -> None:
+    path = rollout(
+        tmp_path,
+        {"type": "function_call_output", "call_id": "1", "output": "START" + "x" * 1_000 + "END"},
+    )
+    text = read_transcript(path, 256)
+    blocks = list(source_blocks(text))
+    assert len(text) <= 256
+    assert blocks[0][0] == "tool result: id=1"
+    assert blocks[0][1].startswith("START") and blocks[0][1].endswith("END")
+
+
+def test_latest_assistant_message_ignores_analysis_and_tool_output(tmp_path: Path) -> None:
+    path = rollout(
+        tmp_path,
+        message("assistant", "Old question?"),
+        message("assistant", "1. First\n2. Second"),
+        {**message("assistant", "private reasoning"), "channel": "analysis"},
+        {"type": "function_call_output", "call_id": "1", "output": "not an assistant reply"},
+    )
+    assert last_assistant_message(path) == "1. First\n2. Second"
+    assert last_assistant_message(rollout(tmp_path, message("user", "Question?"))) == ""
+
+
+@pytest.mark.parametrize("offset", [-1, True, 1.5])
+def test_read_since_rejects_invalid_cursors(tmp_path: Path, offset) -> None:
+    with pytest.raises(ValueError, match="offset"):
+        read_since(tmp_path / "missing", offset)
+
+
+def test_cursor_reads_keep_io_errors_distinct_from_empty_history(tmp_path: Path) -> None:
+    path = tmp_path / "missing"
+    with pytest.raises(TranscriptError, match="Cannot read transcript"):
+        read_since(path, 0)
+    with pytest.raises(TranscriptError, match="Cannot read transcript"):
+        last_assistant_message(path)
+
+
+def test_snapshot_does_not_skip_partial_oversized_records(tmp_path: Path) -> None:
+    path = rollout(tmp_path, message("user", "Initial request"))
+    offset = path.stat().st_size
+    with path.open("ab") as stream:
+        stream.write(b'{"type":"response_item","payload":{"type":"reasoning","text":"')
+        stream.write(b"x" * 1_100_000)
+    text, cursor = read_snapshot(path, 512)
+    assert cursor == offset
+    assert "Incomplete final transcript record omitted" in text
+    with path.open("ab") as stream:
+        stream.write(b'"}}\n')
+        stream.write(
+            json.dumps({"type": "response_item", "payload": message("assistant", "Done")}).encode()
+            + b"\n"
+        )
+    subsequent = read_since(path, cursor)
+    assert "Oversized transcript record omitted" in subsequent
+    assert list(source_blocks(subsequent)) == [("assistant", "Done")]
