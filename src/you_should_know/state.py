@@ -110,7 +110,9 @@ class State:
                 latency REAL NOT NULL,
                 input_tokens INTEGER NOT NULL,
                 cached_input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL
+                output_tokens INTEGER NOT NULL,
+                model_called INTEGER NOT NULL DEFAULT 0,
+                usage_reported INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS hook_events (
                 session_id TEXT NOT NULL,
@@ -164,6 +166,8 @@ class State:
                 ("interactions", "ready_at", "REAL NOT NULL DEFAULT 0"),
                 ("notifications", "created_at", "REAL NOT NULL DEFAULT 0"),
                 ("candidates", "assistant_claim", "INTEGER NOT NULL DEFAULT 0"),
+                ("checks", "model_called", "INTEGER NOT NULL DEFAULT 0"),
+                ("checks", "usage_reported", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 columns = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
                 if not any(column["name"] == name for column in columns):
@@ -340,13 +344,16 @@ class State:
         usage: dict[str, int] | None = None,
         reason: str = "",
         phase: str = "review",
+        model_called: bool = False,
     ) -> None:
+        model_called = model_called or bool(usage)
         usage = usage or {}
+        usage_reported = "input_tokens" in usage and "output_tokens" in usage
         with self.connection:
             self.connection.execute(
                 "INSERT INTO checks(session_id, event, outcome, phase, reason, created_at, "
-                "latency, input_tokens, cached_input_tokens, output_tokens) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "latency, input_tokens, cached_input_tokens, output_tokens, "
+                "model_called, usage_reported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     event,
@@ -358,6 +365,8 @@ class State:
                     usage.get("input_tokens", 0),
                     usage.get("cached_input_tokens", 0),
                     usage.get("output_tokens", 0),
+                    model_called,
+                    usage_reported,
                 ),
             )
 
@@ -682,7 +691,10 @@ class State:
                 "coalesce(avg(CASE WHEN latency > 0 THEN latency END), 0) AS average_latency, "
                 "coalesce(sum(input_tokens), 0) AS input_tokens, "
                 "coalesce(sum(cached_input_tokens), 0) AS cached_input_tokens, "
-                "coalesce(sum(output_tokens), 0) AS output_tokens FROM checks"
+                "coalesce(sum(output_tokens), 0) AS output_tokens, "
+                "coalesce(sum(model_called), 0) AS model_calls, "
+                "coalesce(sum(model_called AND NOT usage_reported), 0) AS usage_unknown_calls "
+                "FROM checks"
             ).fetchone()
         )
         hooks: dict[str, dict[str, float]] = {}
@@ -708,7 +720,11 @@ class State:
             "candidates": counts,
             "candidate_reasons": reasons,
             "recent_checks": [
-                dict(row)
+                {
+                    **dict(row),
+                    "model_called": bool(row["model_called"]),
+                    "usage_reported": bool(row["usage_reported"]),
+                }
                 for row in self.connection.execute("SELECT * FROM checks ORDER BY id DESC LIMIT 20")
             ],
             **totals,

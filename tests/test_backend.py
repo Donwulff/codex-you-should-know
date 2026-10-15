@@ -16,6 +16,33 @@ from you_should_know.backend import BackendError, review
 
 
 class BackendTests(unittest.TestCase):
+    def test_reported_usage_survives_result_and_late_stream_errors(self):
+        for failure in ("json", "oversize", "object", "tool", "exit"):
+            with self.subTest(failure=failure):
+                self.cli(
+                    f"""
+                    failure = {failure!r}
+                    out.write_text('bad' if failure == 'json' else
+                                   'x' * 65537 if failure == 'oversize' else
+                                   '[]' if failure == 'object' else '{{"finding":null}}')
+                    print(json.dumps({{'type': 'turn.completed', 'usage': {{
+                        'input_tokens': 1234, 'output_tokens': 45
+                    }}}}), flush=True)
+                    if failure == 'tool':
+                        print(json.dumps({{'type': 'item.completed', 'item': {{
+                            'type': 'command_execution'
+                        }}}}))
+                    if failure == 'exit':
+                        sys.exit(7)
+                    """
+                )
+                with self.assertRaises(BackendError) as raised:
+                    review("test", self.schema, timeout=5)
+                self.assertEqual(
+                    getattr(raised.exception, "usage", {}),
+                    {"input_tokens": 1234, "output_tokens": 45},
+                )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

@@ -450,3 +450,22 @@ def test_missing_transcript_never_intercepts_bare_answers(state, finding, monkey
     }
     assert hook(monkeypatch, capsys, event) == {}
     assert state.note(identifier)["status"] == "new"
+
+
+@pytest.mark.parametrize("reported", [False, True])
+def test_error_usage_totals_distinguish_known_usage_from_unknown(
+    state, transcript, monkeypatch, reported
+):
+    def reviewer(*args, **kwargs):
+        raise backend.BackendError(
+            "Codex returned no valid JSON review",
+            usage={"input_tokens": 1234, "output_tokens": 45} if reported else None,
+        )
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    assert cli.check(state, Config(), "s", transcript, "Stop")["status"] == "error"
+    status = state.diagnostics()
+    assert status["input_tokens"] == (1234 if reported else 0)
+    assert status["output_tokens"] == (45 if reported else 0)
+    assert status["model_calls"] == 1
+    assert status["usage_unknown_calls"] == (0 if reported else 1)

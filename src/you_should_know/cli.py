@@ -62,11 +62,22 @@ def check(
     deadline = started + config.timeout_seconds
     session = state.observe(session_id, event == "PostToolUse")
     usage: dict[str, int] = {}
+    model_called = False
     phase = "review"
 
     def outcome(status: str, reason: str = "", **details: Any) -> dict[str, Any]:
         latency = time.monotonic() - started
-        state.record_check(session_id, event, status, time.time(), latency, usage, reason, phase)
+        state.record_check(
+            session_id,
+            event,
+            status,
+            time.time(),
+            latency,
+            usage,
+            reason,
+            phase,
+            model_called=model_called,
+        )
         return {"status": status, "reason": reason, "latency": latency, "usage": usage, **details}
 
     def budget() -> bool:
@@ -135,6 +146,7 @@ def check(
                 prompt = make_prompt(transcript, state.previous(), state.known_topics())
                 remaining = max(1, deadline - time.monotonic())
                 state.begin(session_id, time.time())
+                model_called = True
                 response = backend.review(
                     prompt,
                     SCHEMA,
@@ -180,6 +192,7 @@ def check(
                 assert candidate is not None
                 started = time.monotonic()
                 usage = {}
+                model_called = False
             phase = "confirmation"
             if time.monotonic() >= deadline:
                 return hold(candidate, "check time limit reached")
@@ -193,6 +206,7 @@ def check(
             )
             prompt = make_confirmation_prompt(finding, candidate["transcript"], subsequent)
             state.begin(session_id, time.time())
+            model_called = True
             confirming = True
             response = backend.review(
                 prompt,
@@ -220,6 +234,7 @@ def check(
                 return outcome("finding", reason, note=state.note(identifier))
             return outcome("duplicate" if confirmed else "withdrawn", reason)
         except (backend.BackendError, AssessmentError, TranscriptError) as error:
+            usage = getattr(error, "usage", usage)
             detail = str(error)[:500]
             if candidate and confirming:
                 state.resolve_candidate(

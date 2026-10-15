@@ -251,6 +251,57 @@ def test_telemetry_records_outcomes_latency_and_usage(tmp_path):
     state.close()
 
 
+def test_telemetry_distinguishes_partial_usage_from_reported_zero_tokens(tmp_path):
+    state = State(tmp_path)
+    state.record_check("session", "Stop", "finding", 100, 1, {"input_tokens": 5})
+    state.record_check("session", "Stop", "clear", 101, 1, {"input_tokens": 0, "output_tokens": 0})
+    report = state.diagnostics()
+    assert report["model_calls"] == 2
+    assert report["usage_unknown_calls"] == 1
+    assert report["input_tokens"] == 5
+    assert report["output_tokens"] == 0
+    assert report["recent_checks"][0]["usage_reported"] is True
+    assert report["recent_checks"][1]["usage_reported"] is False
+    state.close()
+
+
+def test_telemetry_counts_calls_without_usage_and_excludes_noop_checks(tmp_path):
+    state = State(tmp_path)
+    state.record_check("session", "Stop", "error", 100, 1, model_called=True)
+    state.record_check("session", "Stop", "clear", 101, 1, {}, model_called=True)
+    state.record_check("session", "Stop", "unchanged", 102, 0)
+    state.record_check("session", "Stop", "skipped", 103, 0, {})
+    report = state.diagnostics()
+    assert report["total_checks"] == 4
+    assert report["model_calls"] == 2
+    assert report["usage_unknown_calls"] == 2
+    assert report["input_tokens"] == 0
+    assert report["output_tokens"] == 0
+    assert [check["model_called"] for check in report["recent_checks"]] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+    state.close()
+
+
+def test_telemetry_migration_preserves_legacy_totals_without_inventing_call_counts(tmp_path):
+    state = State(tmp_path)
+    state.record_check("session", "Stop", "error", 100, 1)
+    with state.connection:
+        state.connection.execute("ALTER TABLE checks DROP COLUMN model_called")
+        state.connection.execute("ALTER TABLE checks DROP COLUMN usage_reported")
+    state.close()
+    reopened = State(tmp_path)
+    report = reopened.diagnostics()
+    assert report["total_checks"] == 1
+    assert report["errors"] == 1
+    assert report["model_calls"] == 0
+    assert report["usage_unknown_calls"] == 0
+    reopened.close()
+
+
 def test_hook_sightings_warn_only_about_events_not_observed(tmp_path, monkeypatch):
     monkeypatch.setattr("you_should_know.state.time.time", lambda: 123.0)
     state = State(tmp_path)

@@ -77,6 +77,10 @@ _CONFIG = (
 class BackendError(RuntimeError):
     """A bounded, non-sensitive error safe to show in hook diagnostics."""
 
+    def __init__(self, message: str, *, usage: dict[str, int] | None = None) -> None:
+        super().__init__(message)
+        self.usage = dict(usage or {})
+
 
 class ReviewResponse(dict[str, Any]):
     def __init__(self, response: dict[str, Any], usage: dict[str, int]) -> None:
@@ -242,6 +246,9 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
                     raise BackendError(f"Codex CLI exited with status {return_code}")
                 if not completed:
                     raise BackendError(last_error or "Codex did not complete the review")
+        except BackendError as error:
+            error.usage = dict(usage)
+            raise
         finally:
             try:
                 _stop(process)
@@ -305,10 +312,10 @@ def review(
             with output.open("rb") as result_file:
                 raw = result_file.read(MAX_RESULT_BYTES + 1)
             if len(raw) > MAX_RESULT_BYTES:
-                raise BackendError("Codex review exceeded its result limit")
+                raise BackendError("Codex review exceeded its result limit", usage=usage)
             result = json.loads(raw)
         except (OSError, UnicodeError, ValueError) as exc:
-            raise BackendError("Codex returned no valid JSON review") from exc
+            raise BackendError("Codex returned no valid JSON review", usage=usage) from exc
         if not isinstance(result, dict):
-            raise BackendError("Codex review must be a JSON object")
+            raise BackendError("Codex review must be a JSON object", usage=usage)
         return ReviewResponse(result, usage)
