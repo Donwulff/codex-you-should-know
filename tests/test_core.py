@@ -18,6 +18,14 @@ def interactive_host(monkeypatch):
     monkeypatch.setattr(host, "process_info", lambda pid: (1, "/bin/codex", ["codex"]))
 
 
+@pytest.fixture(autouse=True)
+def forbid_unstubbed_reviews(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Each test must stub its reviewer; live reviews are forbidden")
+
+    monkeypatch.setattr(backend, "review", forbidden)
+
+
 @pytest.fixture
 def state(tmp_path):
     store = State(tmp_path / "state")
@@ -58,6 +66,17 @@ def finding():
         "The tool output contradicts your request to preserve the settings.",
         ["Deleted settings.json and wrote an empty object."],
     )
+
+
+def finding_response(finding, schema_path):
+    if schema_path.name == "confirmation.schema.json":
+        return {
+            "confirmed": True,
+            "reason": "The settings remain deleted and the assistant has not disclosed it.",
+            "evidence": finding.evidence,
+        }
+    assert schema_path.name == "finding.schema.json"
+    return {"finding": {**finding.__dict__, "agent_still_working": False, "assistant_claim": False}}
 
 
 def test_cadence_cooldown_stop_and_limit(state):
@@ -167,7 +186,9 @@ def test_interactive_resume_reviews_despite_historical_source(
 
 def test_manual_check_still_reviews_inside_exec(state, transcript, finding, monkeypatch, capsys):
     monkeypatch.setattr(host, "process_info", lambda pid: (1, "/bin/codex", ["codex", "exec"]))
-    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": finding.__dict__})
+    monkeypatch.setattr(
+        backend, "review", lambda prompt, schema, **kwargs: finding_response(finding, schema)
+    )
     assert (
         main(
             [
@@ -185,7 +206,7 @@ def test_manual_check_still_reviews_inside_exec(state, transcript, finding, monk
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "finding"
     assert result["note"]["summary"] == finding.summary
-    assert state.session("explicit").attempts == 1
+    assert state.session("explicit").attempts == 2
 
 
 def test_manual_check_saves_validated_note_and_survives_reopen(
@@ -198,8 +219,11 @@ def test_manual_check_saves_validated_note_and_survives_reopen(
         assert "Keep the previous settings." in prompt
         assert schema_path.is_file()
         assert model == "session-model"
-        assert 89 < timeout <= 90
-        return {"finding": finding.__dict__}
+        if schema_path.name == "finding.schema.json":
+            assert 44 < timeout <= 45
+        else:
+            assert 0 < timeout <= 90
+        return finding_response(finding, schema_path)
 
     monkeypatch.setattr(backend, "review", reviewer)
     result = check(state, Config(), "s1", transcript, "Stop", "session-model", force=True)
@@ -225,7 +249,10 @@ def test_duplicate_across_sessions_and_disposition(state, finding):
     state.mark(identifier, "known")
     assert state.notes() == []
     assert state.notes(True)[0]["status"] == "known"
-    assert state.previous() == [finding]
+    history = state.previous()
+    assert len(history) == 1
+    assert {key: history[0][key] for key in finding.__dict__} == finding.__dict__
+    assert history[0]["status"] == "known"
     state.mark(identifier, "dismissed")
     assert state.note(identifier)["status"] == "dismissed"
     assert state.save("three", finding, 300) is None
@@ -235,7 +262,7 @@ def test_duplicate_across_sessions_and_disposition(state, finding):
         state.mark(identifier, "invalid")
 
 
-def test_distinct_paths_remain_distinct_notes(state, finding):
+def test_distinct_path_separators_remain_distinct_but_topic_case_deduplicates(state, finding):
     identifiers = [
         state.save("session", replace(finding, topic=topic), 100)
         for topic in (
@@ -244,8 +271,11 @@ def test_distinct_paths_remain_distinct_notes(state, finding):
             "src/A-b.py lost changes",
         )
     ]
-    assert None not in identifiers
-    assert len(set(identifiers)) == 3
+    assert identifiers[0] is not None
+    assert identifiers[1] is not None
+    assert identifiers[0] != identifiers[1]
+    assert identifiers[2] is None
+    assert len(state.notes()) == 2
 
 
 def test_other_sessions_can_review_while_one_is_busy(state, transcript, monkeypatch):
@@ -328,7 +358,14 @@ def test_busy_worker_does_not_spend_check_budget(state, transcript, monkeypatch)
     with review_lock(state.directory, "s1") as locked:
         assert locked
         result = check(state, Config(), "s1", transcript, "Stop", force=True)
-    assert result == {"status": "busy"}
+    assert result["status"] == "skipped"
+    assert result["reason"] == "review is busy"
+    assert result["latency"] >= 0
+    assert result["usage"] == {}
+    recorded = state.diagnostics()["recent_checks"][0]
+    assert recorded["outcome"] == "skipped"
+    assert recorded["reason"] == "review is busy"
+    assert recorded["latency"] == result["latency"]
     assert state.session("s1").attempts == 0
     with review_lock(state.directory, "s1") as locked:
         assert locked
@@ -371,7 +408,9 @@ def test_invalid_assessment_never_becomes_a_clear_check(state, transcript, monke
 
 
 def test_hook_protocol_and_cli_note_actions(state, transcript, finding, monkeypatch, capsys):
-    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": finding.__dict__})
+    monkeypatch.setattr(
+        backend, "review", lambda prompt, schema, **kwargs: finding_response(finding, schema)
+    )
     (state.directory / "config.toml").write_text("every_n_tools = 1\n")
     event = {
         "session_id": "s",
@@ -384,6 +423,12 @@ def test_hook_protocol_and_cli_note_actions(state, transcript, finding, monkeypa
     assert json.loads(capsys.readouterr().out) == {}
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
     assert main([*prefix, "notify"]) == 0
+    assert json.loads(capsys.readouterr().out) == {}
+    assert state.notes() == []
+    assert state.pending_candidate("s") is not None
+    event.update(hook_event_name="Stop", turn_id="finished-turn")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
+    assert main([*prefix, "hook"]) == 0
     warning = json.loads(capsys.readouterr().out)
     assert set(warning) == {"systemMessage"}
     assert finding.summary in warning["systemMessage"]
@@ -396,10 +441,22 @@ def test_hook_protocol_and_cli_note_actions(state, transcript, finding, monkeypa
     assert main([*prefix, "dismiss", identifier]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "dismissed"
     assert main([*prefix, "status"]) == 0
-    assert json.loads(capsys.readouterr().out)["sessions"][0]["attempts"] == 1
+    assert json.loads(capsys.readouterr().out)["sessions"][0]["attempts"] == 2
 
 
 def run_hook(state, monkeypatch, capsys, event, command="hook"):
+    if "transcript_path" not in event:
+        path = state.directory / "completed-turn.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant", "content": "Done."},
+                }
+            )
+            + "\n"
+        )
+        event = {**event, "transcript_path": str(path)}
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(event)))
     assert main(["--data-dir", str(state.directory), command]) == 0
     return json.loads(capsys.readouterr().out)
@@ -410,10 +467,10 @@ def test_stop_delivers_background_finding_even_when_review_is_on_cooldown(
 ):
     started, release = threading.Event(), threading.Event()
 
-    def reviewer(*args, **kwargs):
+    def reviewer(prompt, schema, **kwargs):
         started.set()
         assert release.wait(3)
-        return {"finding": finding.__dict__}
+        return finding_response(finding, schema)
 
     monkeypatch.setattr(backend, "review", reviewer)
     (state.directory / "config.toml").write_text("every_n_tools = 1\n")
@@ -446,7 +503,7 @@ def test_stop_delivers_background_finding_even_when_review_is_on_cooldown(
         timer.join(3)
         thread.join(3)
     assert not thread.is_alive()
-    assert outcomes[0]["status"] == "finding"
+    assert outcomes[0]["status"] == "pending"
     assert finding.summary in output["systemMessage"]
     for option in (
         "[1] Tell me more",
@@ -457,7 +514,7 @@ def test_stop_delivers_background_finding_even_when_review_is_on_cooldown(
     assert "Chat in main session" not in output["systemMessage"]
     assert "4:" not in output["systemMessage"]
     assert set(output) == {"systemMessage"}
-    assert state.session("s").attempts == 1
+    assert state.session("s").attempts == 2
     assert run_hook(state, monkeypatch, capsys, event) == {}
 
 
