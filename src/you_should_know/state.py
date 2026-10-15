@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .assessment import Finding, topic_key
+from .config import Config
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,8 @@ class Session:
     last_success: float
     last_hash: str
     last_error: str
+    touched_at: float = 0
+    cwd: str = ""
 
 
 class State:
@@ -69,6 +72,58 @@ class State:
                 ready INTEGER NOT NULL DEFAULT 0,
                 turn_id TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                offset INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT NOT NULL DEFAULT '',
+                assistant_claim INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                touched_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS candidates_session ON candidates(session_id, status);
+            CREATE TABLE IF NOT EXISTS attempts (
+                session_id TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session_id, created_at);
+            CREATE TABLE IF NOT EXISTS notices (
+                session_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(session_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                latency REAL NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS hook_events (
+                session_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                seen_at REAL NOT NULL,
+                PRIMARY KEY(session_id, event)
+            );
+            CREATE TABLE IF NOT EXISTS mutes (
+                scope TEXT NOT NULL,
+                target TEXT NOT NULL,
+                touched_at REAL NOT NULL,
+                PRIMARY KEY(scope, target)
+            );
         """)
         with self._transaction():
             columns = self.connection.execute("PRAGMA table_info(interactions)").fetchall()
@@ -102,6 +157,32 @@ class State:
                     self.connection.execute(
                         "ALTER TABLE reminders ADD COLUMN expanded INTEGER NOT NULL DEFAULT 0"
                     )
+            for table, name, declaration in (
+                ("sessions", "touched_at", "REAL NOT NULL DEFAULT 0"),
+                ("sessions", "cwd", "TEXT NOT NULL DEFAULT ''"),
+                ("notes", "touched_at", "REAL NOT NULL DEFAULT 0"),
+                ("interactions", "ready_at", "REAL NOT NULL DEFAULT 0"),
+                ("notifications", "created_at", "REAL NOT NULL DEFAULT 0"),
+                ("candidates", "assistant_claim", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                columns = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+                if not any(column["name"] == name for column in columns):
+                    self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+                    if table == "interactions":
+                        self.connection.execute("UPDATE interactions SET ready = 0")
+                    elif table == "notes":
+                        self.connection.execute("UPDATE notes SET touched_at = created_at")
+                    elif table == "sessions" and name == "touched_at":
+                        self.connection.execute(
+                            "UPDATE sessions SET touched_at = CASE "
+                            "WHEN max(last_attempt, last_success) = 0 THEN ? "
+                            "ELSE max(last_attempt, last_success) END",
+                            (time.time(),),
+                        )
+                    elif table == "notifications":
+                        self.connection.execute(
+                            "UPDATE notifications SET created_at = ?", (time.time(),)
+                        )
 
     def close(self) -> None:
         self.connection.close()
@@ -109,7 +190,9 @@ class State:
     def observe(self, session_id: str, is_tool: bool) -> Session:
         with self.connection:
             self.connection.execute(
-                "INSERT OR IGNORE INTO sessions(session_id) VALUES (?)", (session_id,)
+                "INSERT INTO sessions(session_id, touched_at) VALUES (?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at",
+                (session_id, time.time()),
             )
             if is_tool:
                 self.connection.execute(
@@ -129,8 +212,14 @@ class State:
         with self.connection:
             self.connection.execute(
                 "UPDATE sessions SET checked_events = events, attempts = attempts + 1, "
-                "last_attempt = ? WHERE session_id = ?",
-                (now, session_id),
+                "last_attempt = ?, touched_at = ? WHERE session_id = ?",
+                (now, now, session_id),
+            )
+            self.connection.execute(
+                "INSERT INTO attempts(session_id, created_at) VALUES (?, ?)", (session_id, now)
+            )
+            self.connection.execute(
+                "DELETE FROM notices WHERE session_id = ? AND key = 'budget'", (session_id,)
             )
 
     def finish(self, session_id: str, now: float, digest: str, error: str = "") -> None:
@@ -146,14 +235,186 @@ class State:
                     (now, digest, session_id),
                 )
 
-    def previous(self) -> list[Finding]:
+    def previous(self) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT * FROM notes ORDER BY created_at DESC LIMIT 40"
         ).fetchall()
-        return [
-            Finding(row["topic"], row["summary"], row["explanation"], json.loads(row["evidence"]))
-            for row in rows
-        ]
+        return [self._decode(row) for row in rows]
+
+    def known_topics(self) -> list[str]:
+        rows = self.connection.execute(
+            "SELECT topic FROM notes WHERE status IN ('known', 'dismissed') "
+            "ORDER BY touched_at DESC, created_at DESC"
+        )
+        return list(dict.fromkeys(topic_key(row["topic"]).casefold() for row in rows))
+
+    def has_topic(self, topic: str) -> bool:
+        normalized = topic_key(topic).casefold()
+        return any(
+            topic_key(row["topic"]).casefold() == normalized
+            for row in self.connection.execute("SELECT topic FROM notes")
+        )
+
+    def budget_available(self, session_id: str, config: Config, now: float) -> bool:
+        if (
+            config.max_checks_per_session is not None
+            and self.session(session_id).attempts >= config.max_checks_per_session
+        ):
+            return False
+        recent = self.connection.execute(
+            "SELECT count(*) FROM attempts WHERE session_id = ? AND created_at > ?",
+            (session_id, now - 3600),
+        ).fetchone()[0]
+        return recent < config.max_checks_per_hour
+
+    def notice_once(self, session_id: str, key: str) -> bool:
+        with self.connection:
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO notices(session_id, key, created_at) VALUES (?, ?, ?)",
+                (session_id, key, time.time()),
+            )
+        return bool(cursor.rowcount)
+
+    def candidate(
+        self,
+        session_id: str,
+        finding: Finding,
+        now: float,
+        transcript: str,
+        offset: int,
+        status: str = "pending",
+        reason: str = "",
+        assistant_claim: bool = False,
+    ) -> int:
+        if status not in {"pending", "suppressed"}:
+            raise ValueError("Invalid initial candidate status")
+        with self.connection:
+            cursor = self.connection.execute(
+                "INSERT INTO candidates(session_id, topic, summary, explanation, evidence, "
+                "transcript, offset, status, reason, created_at, touched_at, assistant_claim) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    finding.topic,
+                    finding.summary,
+                    finding.explanation,
+                    json.dumps(finding.evidence, ensure_ascii=False),
+                    transcript,
+                    offset,
+                    status,
+                    reason,
+                    now,
+                    now,
+                    assistant_claim,
+                ),
+            )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
+    def pending_candidate(self, session_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM candidates WHERE session_id = ? AND status = 'pending' "
+            "ORDER BY id LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return self._decode(row) if row is not None else None
+
+    def resolve_candidate(self, identifier: int, status: str, reason: str, now: float) -> bool:
+        if status not in {"pending", "confirmed", "withdrawn", "suppressed"}:
+            raise ValueError("Invalid candidate status")
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE candidates SET status = ?, reason = ?, touched_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (status, reason, now, identifier),
+            )
+        return bool(cursor.rowcount)
+
+    def record_check(
+        self,
+        session_id: str,
+        event: str,
+        outcome: str,
+        now: float,
+        latency: float,
+        usage: dict[str, int] | None = None,
+        reason: str = "",
+        phase: str = "review",
+    ) -> None:
+        usage = usage or {}
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO checks(session_id, event, outcome, phase, reason, created_at, "
+                "latency, input_tokens, cached_input_tokens, output_tokens) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    event,
+                    outcome,
+                    phase,
+                    reason,
+                    now,
+                    latency,
+                    usage.get("input_tokens", 0),
+                    usage.get("cached_input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                ),
+            )
+
+    def hook_seen(self, session_id: str, event: str, cwd: str = "") -> None:
+        now = time.time()
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO sessions(session_id, touched_at, cwd) VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at, "
+                "cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END",
+                (session_id, now, cwd),
+            )
+            self.connection.execute(
+                "INSERT INTO hook_events(session_id, event, seen_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id, event) DO UPDATE SET seen_at = excluded.seen_at",
+                (session_id, event, now),
+            )
+
+    def muted(self, session_id: str, cwd: str = "") -> bool:
+        project = str(Path(cwd).resolve()) if cwd else ""
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE mutes SET touched_at = ? WHERE (scope = 'session' AND target = ?) "
+                "OR (scope = 'project' AND target = ? AND ? != '')",
+                (time.time(), session_id, project, project),
+            )
+        return bool(cursor.rowcount)
+
+    def mute(self, session_id: str, cwd: str = "", project: bool = False) -> None:
+        if project and not cwd:
+            raise ValueError("Project mute requires a working directory")
+        target = str(Path(cwd).resolve()) if project else session_id
+        with self._transaction():
+            self.connection.execute(
+                "INSERT INTO mutes(scope, target, touched_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(scope, target) DO UPDATE SET touched_at = excluded.touched_at",
+                ("project" if project else "session", target, time.time()),
+            )
+            self.connection.execute("DELETE FROM interactions WHERE session_id = ?", (session_id,))
+
+    def unmute(self, session_id: str, cwd: str = "", project: bool = False) -> None:
+        if project and not cwd:
+            raise ValueError("Project mute requires a working directory")
+        target = str(Path(cwd).resolve()) if project else session_id
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM mutes WHERE scope = ? AND target = ?",
+                ("project" if project else "session", target),
+            )
+
+    def has_notifications(self, session_id: str) -> bool:
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM notifications WHERE session_id = ? LIMIT 1", (session_id,)
+            ).fetchone()
+            is not None
+        )
 
     @contextlib.contextmanager
     def _transaction(self) -> Generator[None]:
@@ -164,34 +425,67 @@ class State:
     def save(
         self, session_id: str, finding: Finding, now: float, notify: bool = False
     ) -> str | None:
-        key = hashlib.sha256(topic_key(finding.topic).encode()).hexdigest()[:12]
         with self._transaction():
-            cursor = self.connection.execute(
-                "INSERT OR IGNORE INTO notes "
-                "(id, session_id, topic, summary, explanation, evidence, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            return self._save(session_id, finding, now, notify)
+
+    def _save(self, session_id: str, finding: Finding, now: float, notify: bool) -> str | None:
+        normalized = topic_key(finding.topic).casefold()
+        key = hashlib.sha256(normalized.encode()).hexdigest()[:12]
+        for row in self.connection.execute("SELECT id, topic FROM notes"):
+            if topic_key(row["topic"]).casefold() == normalized:
+                self.connection.execute(
+                    "UPDATE notes SET touched_at = ? WHERE id = ?", (now, row["id"])
+                )
+                return None
+        cursor = self.connection.execute(
+            "INSERT OR IGNORE INTO notes "
+            "(id, session_id, topic, summary, explanation, evidence, created_at, touched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                key,
+                session_id,
+                finding.topic,
+                finding.summary,
+                finding.explanation,
+                json.dumps(finding.evidence, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        if cursor.rowcount and notify:
+            self.connection.execute(
+                "INSERT INTO notifications(session_id, note_id, created_at) VALUES (?, ?, ?)",
+                (session_id, key, now),
+            )
+        return key if cursor.rowcount else None
+
+    def publish_candidate(self, identifier: int, now: float, notify: bool = False) -> str | None:
+        with self._transaction():
+            row = self.connection.execute(
+                "SELECT * FROM candidates WHERE id = ? AND status = 'pending'", (identifier,)
+            ).fetchone()
+            if row is None:
+                return None
+            finding = Finding(
+                row["topic"], row["summary"], row["explanation"], json.loads(row["evidence"])
+            )
+            key = self._save(row["session_id"], finding, now, notify)
+            self.connection.execute(
+                "UPDATE candidates SET status = ?, reason = ?, touched_at = ? WHERE id = ?",
                 (
-                    key,
-                    session_id,
-                    finding.topic,
-                    finding.summary,
-                    finding.explanation,
-                    json.dumps(finding.evidence, ensure_ascii=False),
+                    "confirmed" if key else "suppressed",
+                    "confirmed unresolved and undisclosed" if key else "duplicate topic",
                     now,
+                    identifier,
                 ),
             )
-            if cursor.rowcount and notify:
-                self.connection.execute(
-                    "INSERT INTO notifications(session_id, note_id) VALUES (?, ?)",
-                    (session_id, key),
-                )
-        return key if cursor.rowcount else None
+            return key
 
     def queue_error(self, session_id: str, message: str) -> None:
         with self._transaction():
             self.connection.execute(
-                "INSERT INTO notifications(session_id, message) VALUES (?, ?)",
-                (session_id, message),
+                "INSERT INTO notifications(session_id, message, created_at) VALUES (?, ?, ?)",
+                (session_id, message, time.time()),
             )
 
     def deliver(
@@ -199,6 +493,8 @@ class State:
     ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         notifications = []
         armed_note = None
+        newly_delivered = set()
+        now = time.time()
         with self._transaction():
             rows = self.connection.execute(
                 "SELECT * FROM notifications WHERE session_id = ? ORDER BY id", (session_id,)
@@ -213,6 +509,10 @@ class State:
                 if note is None:
                     continue
                 notifications.append({"note": self._decode(note)})
+                newly_delivered.add(note["id"])
+                self.connection.execute(
+                    "UPDATE notes SET touched_at = ? WHERE id = ?", (now, note["id"])
+                )
                 self.connection.execute(
                     "INSERT OR IGNORE INTO reminders(session_id, note_id) VALUES (?, ?)",
                     (session_id, note["id"]),
@@ -234,10 +534,14 @@ class State:
                 ).fetchone()
                 if note is not None:
                     self.connection.execute(
-                        "INSERT INTO interactions(session_id, note_id, ready, turn_id) "
-                        "VALUES (?, ?, 1, ?) ON CONFLICT(session_id) DO UPDATE SET "
-                        "note_id = excluded.note_id, ready = 1, turn_id = excluded.turn_id",
-                        (session_id, note["id"], turn_id),
+                        "UPDATE notes SET touched_at = ? WHERE id = ?", (now, note["id"])
+                    )
+                    self.connection.execute(
+                        "INSERT INTO interactions(session_id, note_id, ready, turn_id, ready_at) "
+                        "VALUES (?, ?, 1, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+                        "note_id = excluded.note_id, ready = 1, turn_id = excluded.turn_id, "
+                        "ready_at = excluded.ready_at",
+                        (session_id, note["id"], turn_id, now),
                     )
                     if note["last_turn_id"] != turn_id:
                         armed_note = self._decode(note)
@@ -245,6 +549,8 @@ class State:
                         last_turn_id = armed_note.pop("last_turn_id")
                         if last_turn_id:
                             notifications.append({"note": armed_note, "reminder": True})
+                        elif note["id"] not in newly_delivered:
+                            armed_note["already_shown"] = True
                         self.connection.execute(
                             "UPDATE reminders SET last_turn_id = ? WHERE note_id = ?",
                             (turn_id, note["id"]),
@@ -252,7 +558,11 @@ class State:
         return notifications, armed_note
 
     def reply(
-        self, session_id: str, action: str | None, turn_id: str | None = None
+        self,
+        session_id: str,
+        action: str | None,
+        turn_id: str | None = None,
+        timeout_seconds: int = 600,
     ) -> dict[str, Any] | None:
         if action not in {None, "more", "known", "dismissed", "chat"}:
             raise ValueError("Invalid note action")
@@ -265,8 +575,9 @@ class State:
                 "WHERE interactions.session_id = ? AND interactions.ready = 1 "
                 "AND interactions.turn_id != '' AND interactions.turn_id != ? "
                 "AND ? != '' "
+                "AND interactions.ready_at > ? "
                 "AND notes.status = 'new'",
-                (session_id, turn_id, turn_id),
+                (session_id, turn_id, turn_id, time.time() - timeout_seconds),
             ).fetchone()
             if (
                 action is None
@@ -280,11 +591,18 @@ class State:
                 return None
             result = self._decode(note)
             result["expanded"] = bool(result["expanded"])
+            self.connection.execute(
+                "UPDATE notes SET touched_at = ? WHERE id = ?", (time.time(), note["id"])
+            )
             if action == "more":
                 self.connection.execute(
                     "UPDATE reminders SET expanded = 1 WHERE note_id = ?", (note["id"],)
                 )
                 result["expanded"] = True
+                self.connection.execute(
+                    "UPDATE interactions SET ready_at = ? WHERE session_id = ?",
+                    (time.time(), session_id),
+                )
             if action in {"known", "dismissed"}:
                 self.connection.execute(
                     "UPDATE notes SET status = ? WHERE id = ?", (action, note["id"])
@@ -308,6 +626,9 @@ class State:
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["evidence"] = json.loads(result["evidence"])
+        if "assistant_claim" in result:
+            result["assistant_claim"] = bool(result["assistant_claim"])
+        result.pop("touched_at", None)
         return result
 
     def note(self, identifier: str) -> dict[str, Any]:
@@ -322,7 +643,8 @@ class State:
         with self._transaction():
             self.note(identifier)
             self.connection.execute(
-                "UPDATE notes SET status = ? WHERE id = ?", (status, identifier)
+                "UPDATE notes SET status = ?, touched_at = ? WHERE id = ?",
+                (status, time.time(), identifier),
             )
             self.connection.execute("DELETE FROM interactions WHERE note_id = ?", (identifier,))
             self.connection.execute("DELETE FROM reminders WHERE note_id = ?", (identifier,))
@@ -335,23 +657,162 @@ class State:
             )
         ]
 
+    def diagnostics(self) -> dict[str, Any]:
+        counts = {"pending": 0, "confirmed": 0, "suppressed": 0, "withdrawn": 0}
+        counts.update(
+            {
+                row["status"]: row["total"]
+                for row in self.connection.execute(
+                    "SELECT status, count(*) AS total FROM candidates GROUP BY status"
+                )
+            }
+        )
+        reasons = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT status, reason, count(*) AS total FROM candidates "
+                "WHERE reason != '' GROUP BY status, reason ORDER BY total DESC"
+            )
+        ]
+        totals = dict(
+            self.connection.execute(
+                "SELECT count(*) AS total_checks, "
+                "coalesce(sum(outcome = 'error'), 0) AS errors, "
+                "coalesce(sum(latency), 0) AS latency_seconds, "
+                "coalesce(avg(CASE WHEN latency > 0 THEN latency END), 0) AS average_latency, "
+                "coalesce(sum(input_tokens), 0) AS input_tokens, "
+                "coalesce(sum(cached_input_tokens), 0) AS cached_input_tokens, "
+                "coalesce(sum(output_tokens), 0) AS output_tokens FROM checks"
+            ).fetchone()
+        )
+        hooks: dict[str, dict[str, float]] = {}
+        for row in self.connection.execute("SELECT * FROM hook_events ORDER BY session_id, event"):
+            hooks.setdefault(row["session_id"], {})[row["event"]] = row["seen_at"]
+        warnings = []
+        for session_id, events in hooks.items():
+            missing = {
+                "Stop",
+                "PostToolUse",
+                "PostToolUse:notify",
+                "UserPromptSubmit",
+            } - events.keys()
+            for event in sorted(missing):
+                warnings.append(
+                    {
+                        "session_id": session_id,
+                        "message": f"{', '.join(sorted(events))} seen, {event} never seen: "
+                        f"the {event} hook may be untrusted or has not run yet",
+                    }
+                )
+        return {
+            "candidates": counts,
+            "candidate_reasons": reasons,
+            "recent_checks": [
+                dict(row)
+                for row in self.connection.execute("SELECT * FROM checks ORDER BY id DESC LIMIT 20")
+            ],
+            **totals,
+            "hooks": hooks,
+            "warnings": warnings,
+            "mutes": [dict(row) for row in self.connection.execute("SELECT * FROM mutes")],
+        }
+
+    def prune(self, retention_days: int, now: float) -> dict[str, int]:
+        cutoff = now - retention_days * 86_400
+        removed: dict[str, int] = {}
+        with _prune_guard(self.directory, exclusive=True) as acquired:
+            if not acquired:
+                return removed
+            with self._transaction():
+                stale_sessions = [
+                    row["session_id"]
+                    for row in self.connection.execute(
+                        "SELECT session_id FROM sessions WHERE touched_at < ?", (cutoff,)
+                    )
+                ]
+                for table in ("notes", "candidates", "sessions", "mutes"):
+                    cursor = self.connection.execute(
+                        f"DELETE FROM {table} WHERE touched_at < ?", (cutoff,)
+                    )
+                    removed[table] = cursor.rowcount
+                for table in ("checks", "attempts", "notices"):
+                    cursor = self.connection.execute(
+                        f"DELETE FROM {table} WHERE created_at < ?", (cutoff,)
+                    )
+                    removed[table] = cursor.rowcount
+                removed["hook_events"] = self.connection.execute(
+                    "DELETE FROM hook_events WHERE seen_at < ?", (cutoff,)
+                ).rowcount
+                for table in ("reminders", "interactions", "notifications"):
+                    removed[table] = self.connection.execute(
+                        f"DELETE FROM {table} WHERE note_id IS NOT NULL "
+                        "AND note_id NOT IN (SELECT id FROM notes)"
+                    ).rowcount
+                    for session_id in stale_sessions:
+                        removed[table] += self.connection.execute(
+                            f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
+                        ).rowcount
+                removed["notifications"] += self.connection.execute(
+                    "DELETE FROM notifications WHERE created_at < ?", (cutoff,)
+                ).rowcount
+                for session_id in stale_sessions:
+                    self.connection.execute(
+                        "DELETE FROM mutes WHERE scope = 'session' AND target = ?", (session_id,)
+                    )
+            active_keys = {
+                hashlib.sha256(row["session_id"].encode()).hexdigest()
+                for row in self.connection.execute("SELECT session_id FROM sessions")
+            }
+            removed["locks"] = 0
+            for path in self.directory.glob("review-*.lock"):
+                key = path.name.removeprefix("review-").removesuffix(".lock")
+                if key in active_keys or path.stat().st_mtime >= cutoff:
+                    continue
+                descriptor = os.open(path, os.O_RDWR)
+                try:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    path.unlink()
+                    removed["locks"] += 1
+                finally:
+                    os.close(descriptor)
+        return removed
+
 
 @contextlib.contextmanager
-def review_lock(directory: Path, session_id: str, wait_seconds: float = 0) -> Generator[bool]:
-    key = hashlib.sha256(session_id.encode()).hexdigest()
-    descriptor = os.open(directory / f"review-{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
-    deadline = time.monotonic() + wait_seconds
+def _prune_guard(directory: Path, exclusive: bool = False) -> Generator[bool]:
+    descriptor = os.open(directory / ".review-prune.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    yield False
-                    return
-                time.sleep(min(0.05, remaining))
+        operation = fcntl.LOCK_EX | fcntl.LOCK_NB if exclusive else fcntl.LOCK_SH
+        try:
+            fcntl.flock(descriptor, operation)
+        except BlockingIOError:
+            yield False
+            return
         yield True
     finally:
         os.close(descriptor)
+
+
+@contextlib.contextmanager
+def review_lock(directory: Path, session_id: str, wait_seconds: float = 0) -> Generator[bool]:
+    with _prune_guard(directory):
+        key = hashlib.sha256(session_id.encode()).hexdigest()
+        descriptor = os.open(directory / f"review-{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        deadline = time.monotonic() + wait_seconds
+        try:
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        yield False
+                        return
+                    time.sleep(min(0.05, remaining))
+            yield True
+        finally:
+            os.close(descriptor)
