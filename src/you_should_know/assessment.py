@@ -3,7 +3,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .backend import MAX_PROMPT_BYTES
-from .transcript import source_blocks
+from .transcript import frame, source_blocks
 
 
 class AssessmentError(ValueError):
@@ -120,9 +120,26 @@ Prefer silence over weak, speculative, generic, or repetitive notes.
 def _excerpt(text: str, keep: int) -> str:
     if len(text) <= keep:
         return text
+    marker = "\n[... conversation shortened to fit reviewer input budget ...]\n"
+    blocks = list(source_blocks(text))
+    if blocks:
+        total = sum(len(body) for _, body in blocks)
+        keep = min(keep, total)
+        first = keep // 3
+        last = keep - first
+        head, tail = [], []
+        position = 0
+        for label, body in blocks:
+            prefix_end = min(len(body), max(0, first - position))
+            suffix_start = max(0, total - last - position)
+            if prefix_end:
+                head.append(frame(label, body[:prefix_end]))
+            if suffix_start < len(body):
+                tail.append(frame(label, body[suffix_start:]))
+            position += len(body)
+        return "\n\n".join(head) + marker + "\n\n".join(tail)
     first = keep // 3
     last = keep - first
-    marker = "\n[... conversation shortened to fit reviewer input budget ...]\n"
     return text[:first] + marker + (text[-last:] if last else "")
 
 
