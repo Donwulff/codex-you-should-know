@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Held findings as hidden candidates until a separate confirmation checks subsequent conversation activity and the assistant's latest messages. Only unresolved, undisclosed concerns become notes. Confirmation runs at the next eligible check or at turn end and adds one model call per candidate.
+- Required exact tool-result evidence for findings. A claim contradicted by tool output also needs a quote from the assistant. The reviewer now treats requests, bug reports, and issue descriptions as claims to verify, suppresses concerns the assistant is still working on, and checks for prior disclosure.
+- Replaced the default lifetime cap with 30 model calls per session per rolling hour, including confirmations. This bounds sustained usage without permanently disabling reviews in long-lived sessions. Existing `max_checks_per_session` settings remain additional lifetime limits; remove that setting to use the rolling limit alone.
+- Added `ysk 1` through `ysk 4` replies. When Codex asks a question or presents numbered or lettered choices, only prefixed note replies are intercepted. Missing transcripts also require the prefix. Kept the existing 1–4 meanings, including **3** for Dismiss, so learned replies do not change actions. Reply shortcuts now expire after ten minutes by default.
+- Included statuses with recent note summaries and supplied known and dismissed topic labels separately within the prompt budget. Topic matching now ignores case as well as whitespace.
+
+### Added
+
+- Added candidate counts and suppression or withdrawal reasons to `status`, alongside recent outcomes, errors, latency, token totals, and the last occurrence of each hook event. Missing hook events produce a diagnostic hint about trust or a hook that has not run yet.
+- Added `debug = true` and `YSK_DEBUG=1` for a one-line check outcome, latency, and token-usage message.
+- Added `ysk off` and `ysk off project` to mute a session or working directory, with `ysk on` and `ysk on project` to remove the corresponding mute. Dismissal now includes the mute hint.
+- Added `final_check = false` to skip blocking end-of-turn reviews and confirmations while still delivering queued notes. Pending candidates remain for the next eligible background check. The default remains `true`.
+- Added configurable 30-day retention for inactive state and safe removal of obsolete review lock files. Pruned known and dismissed topics can appear again.
+
+### Fixed
+
+- Sent conversation evidence as plain text, preserving quotes, newlines, and backslashes without weakening exact-match validation.
+- Counted only real model requests toward limits. Budget exhaustion now produces one notice and preserves unconfirmed candidates. Confirmation failures withdraw candidates with a recorded reason.
+- Withdrew stale confirmations when the conversation advanced during the call, and prevented concurrent hooks from reopening finalized candidates.
+- Stopped repeating a note's summary at turn end when it already appeared during that turn. The reply menu now says "Reply now".
+- Reported configuration errors once per session for each changed configuration file, including its path.
+- Skipped process-tree detection in the display hook when nothing is queued.
+- Retained reported token usage when a result failed validation and distinguished unavailable usage from reported zero tokens.
+
+### For contributors
+
+- Made the native Codex discovery test opt-in with `YSK_TEST_NATIVE_CODEX=1` because it temporarily installs the plugin. Ordinary tests stub reviewer calls and skip that installation test.
+
+Restart Codex after updating. The four hook definitions are unchanged, so this round introduces no hook re-trust requirement. Existing notes are preserved subject to the new retention setting.
+
 ## [0.2.6] - 2026-10-15
 
 ### Changed
