@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Keep candidates pending when new messages or tool activity arrive during confirmation, then recheck them with the newer context. Previously, even unrelated activity permanently withdrew an otherwise confirmed concern. Retries retain the same candidate and remain subject to the call budget.
 - Made native discovery testing opt-in as documented, so ordinary development validation does not install test plugins.
 - Review a changed, completed turn even when a recent background review is still on cooldown. Previously, a review could suppress ongoing work and then skip its finished result. Call budgets, unchanged-excerpt detection, and `final_check = false` still apply.
 

@@ -43,6 +43,8 @@ Potential findings remain unconfirmed candidates until a separate review checks 
 
 `recent_checks` records the requested model ID and its source (`config`, `hook`, or `argument`) for model calls. `model_usage` groups calls and tokens by model and source. A `cli_default` source with a null model means the reviewer CLI chose without reporting its model; null model metadata in older records is unknown. Do not infer those model IDs from the current chat or configuration. Review and confirmation can use different models if the chat's selection changes between checks. Optional `review_instructions` adds focus to initial reviews without replacing evidence or confirmation requirements.
 
+New messages or tool activity during a confirmation call keep the candidate pending for a later confirmation with updated context; they do not establish that the concern was fixed or invalid. Retries use additional model calls within the configured budget. A historical withdrawal with reason `Conversation advanced during confirmation` came from the older rule that discarded the candidate on any new visible activity, without assessing that activity's relevance.
+
 Run `know` or `dismiss` when the user requests that disposition. Reading notes does not change their status. If the user asks for a manual check, use the requested transcript and session. Manual checks consume Codex model usage and can make two calls when a candidate needs confirmation. Do not guess a transcript path or scan unrelated sessions.
 
 The hooks display notifications separately from the main agent. Choosing `chat in main session` or reading a note through this skill shares that note with the agent. Do not inject unrelated notes into the conversation or automatically act on an alert.

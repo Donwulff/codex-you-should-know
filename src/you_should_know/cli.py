@@ -255,7 +255,11 @@ def check(
             if confirmed and read_since(
                 transcript_path, confirmation_offset, config.max_context_chars
             ):
-                confirmed, reason = False, "Conversation advanced during confirmation"
+                state.finish(session_id, time.time(), digest)
+                return hold(
+                    candidate,
+                    "New messages or tool activity arrived during confirmation; will recheck",
+                )
             if confirmed:
                 identifier = state.publish_candidate(candidate["id"], time.time(), notify=not force)
             else:
