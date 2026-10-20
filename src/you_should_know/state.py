@@ -754,9 +754,14 @@ class State:
             result.append(item)
         return result
 
-    def candidates(self, cwd: str | None = None) -> list[dict[str, Any]]:
+    def candidates(
+        self, cwd: str | None = None, *, all_candidates: bool = False
+    ) -> list[dict[str, Any]]:
         join, cwd_clause, params = self._cwd_join("candidates", cwd)
-        where = f"WHERE {cwd_clause}" if cwd_clause else ""
+        conditions = [] if all_candidates else ["candidates.status = 'pending'"]
+        if cwd_clause:
+            conditions.append(cwd_clause)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = self.connection.execute(
             "SELECT candidates.id, candidates.session_id, candidates.status, candidates.reason, "
             "candidates.topic, candidates.summary, candidates.created_at, candidates.touched_at, "

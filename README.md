@@ -181,7 +181,7 @@ python3 scripts/you_should_know.py status --skipped
 python3 scripts/you_should_know.py status --cwd .
 ```
 
-The identifier `8f31a7c62b40` is illustrative; replace it with an identifier from `notes`. The notes list contains up to 100 recent open notes, or 100 notes of any status with `--all`. It also lists every candidate in compact form (identifier, status, reason, topic, summary, timestamps, and working directory), including pending findings that have not been confirmed yet. `--cwd PATH` limits both lists to sessions from that directory. Reading a note leaves its status unchanged.
+The identifier `8f31a7c62b40` is illustrative; replace it with an identifier from `notes`. By default, `notes` lists up to 100 recent open notes and candidates still awaiting confirmation. Use `notes --all` to include known and dismissed notes, plus confirmed, suppressed, and withdrawn candidates. Candidates appear in compact form (identifier, status, reason, topic, summary, timestamps, and working directory). `--cwd PATH` limits both lists to sessions from that directory. Reading a note leaves its status unchanged. The configured retention period still applies to this history (30 days of inactivity by default).
 
 To request a check immediately, supply a Codex rollout transcript and session identifier. Manual checks work inside noninteractive sessions and bypass the tool cadence, cooldown, and model-call limits. They still require confirmation before returning a note and can make two model calls:
 
@@ -255,7 +255,7 @@ Checks retain the first three user messages and recent transcript activity withi
 | A note reply reaches the main agent | Check `status` for a missing `UserPromptSubmit` hook. Trust the reply hook, wait for the end-of-turn menu, and use `ysk N` within the reply window. Bare answers pass through when Codex may be waiting for your answer. |
 | A hook is marked **modified** after an update | Review and trust the new definition through `/hooks`. |
 | A check reports an authentication failure | Run `codex login`, then try another check. |
-| No notes appear after a successful check | Inspect candidates in `notes` and counts or reasons in `status`. A concern may await confirmation, be suppressed as ongoing work or a duplicate, or have been withdrawn after confirmation. A clear check found nothing to report. |
+| No notes appear after a successful check | Inspect pending candidates in `notes`, candidate history in `notes --all`, and counts or reasons in `status`. A concern may await confirmation, be suppressed as ongoing work or a duplicate, or have been withdrawn after confirmation. A clear check found nothing to report. |
 
 ## Development
 

@@ -604,6 +604,53 @@ def test_notes_cli_includes_candidates_and_cwd_filter(state, finding, capsys):
     assert json.loads(capsys.readouterr().out) == {"notes": [], "candidates": []}
 
 
+def test_notes_cli_keeps_candidate_history_behind_all(state, finding, capsys):
+    project = str(state.directory / "app")
+    other = str(state.directory / "other")
+    state.hook_seen("s", "Stop", project)
+    state.hook_seen("other", "Stop", other)
+    pending = state.candidate("s", finding, 100, "source", 1)
+    withdrawn = state.candidate("s", finding, 101, "source", 1)
+    state.resolve_candidate(
+        withdrawn, "withdrawn", "Conversation advanced during confirmation", 102
+    )
+    suppressed = state.candidate("s", finding, 103, "source", 1, status="suppressed")
+    confirmed = state.candidate("s", finding, 104, "source", 1)
+    note_id = state.publish_candidate(confirmed, 105)
+    assert note_id is not None
+    elsewhere = state.candidate("other", finding, 106, "source", 1)
+    state.resolve_candidate(elsewhere, "withdrawn", "Already disclosed", 107)
+
+    assert cli.main(["notes"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in listed["notes"]] == [note_id]
+    assert [item["id"] for item in listed["candidates"]] == [pending]
+    assert cli.main(["notes", "--all"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in listed["candidates"]] == [
+        elsewhere,
+        confirmed,
+        suppressed,
+        withdrawn,
+        pending,
+    ]
+    assert cli.main(["notes", "--all", "--cwd", project]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in listed["candidates"]] == [
+        confirmed,
+        suppressed,
+        withdrawn,
+        pending,
+    ]
+    assert listed["candidates"][2]["reason"] == "Conversation advanced during confirmation"
+    assert state.diagnostics()["candidates"] == {
+        "pending": 1,
+        "confirmed": 1,
+        "suppressed": 1,
+        "withdrawn": 2,
+    }
+
+
 def test_status_cli_hides_skipped_checks_unless_requested(state, finding, capsys):
     project = str(state.directory / "app")
     now = time.time()

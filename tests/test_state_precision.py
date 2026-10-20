@@ -623,7 +623,8 @@ def test_notes_list_compact_candidates_and_filter_by_cwd(tmp_path):
     assert notes[0]["cwd"] == project
     assert state.notes(cwd=other) == []
     state.resolve_candidate(here, "withdrawn", "assistant disclosed it", 110)
-    withdrawn = state.candidates(cwd=project)
+    assert state.candidates(cwd=project) == []
+    withdrawn = state.candidates(cwd=project, all_candidates=True)
     assert withdrawn[0]["status"] == "withdrawn"
     assert withdrawn[0]["reason"] == "assistant disclosed it"
     state.close()

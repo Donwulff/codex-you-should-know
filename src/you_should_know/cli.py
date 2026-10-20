@@ -523,7 +523,11 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("hook", help="Handle a Codex lifecycle event on stdin")
     commands.add_parser("notify", help="Display queued notes from a synchronous Codex hook")
     notes = commands.add_parser("notes", help="List unread notes and review candidates as JSON")
-    notes.add_argument("--all", action="store_true", help="Include known and dismissed notes")
+    notes.add_argument(
+        "--all",
+        action="store_true",
+        help="Include known and dismissed notes and confirmed, suppressed, or withdrawn candidates",
+    )
     notes.add_argument(
         "--cwd",
         metavar="PATH",
@@ -660,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "notes":
             output = {
                 "notes": state.notes(args.all, cwd=args.cwd),
-                "candidates": state.candidates(cwd=args.cwd),
+                "candidates": state.candidates(cwd=args.cwd, all_candidates=args.all),
             }
         elif args.command == "show":
             output = state.note(args.id)

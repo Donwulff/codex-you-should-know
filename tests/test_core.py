@@ -439,6 +439,9 @@ def test_hook_protocol_and_cli_note_actions(state, transcript, finding, monkeypa
     assert main([*prefix, "notes"]) == 0
     listed = json.loads(capsys.readouterr().out)
     identifier = listed["notes"][0]["id"]
+    assert listed["candidates"] == []
+    assert main([*prefix, "notes", "--all"]) == 0
+    listed = json.loads(capsys.readouterr().out)
     assert listed["candidates"][0]["status"] == "confirmed"
     assert listed["candidates"][0]["topic"] == finding.topic
     assert main([*prefix, "show", identifier]) == 0
