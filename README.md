@@ -257,27 +257,63 @@ Checks retain the first three user messages and recent transcript activity withi
 
 Record user-visible changes under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). For a release, move those entries into a dated version section and use that section for the GitHub release notes.
 
-From a checkout, install the development tools with [uv](https://docs.astral.sh/uv/) and run the local checks:
+To update and install your own development version, close Codex chat windows and
+standalone CLI sessions, then run this from the checkout in a normal terminal.
+Codex's background services can stay running; you do not need to kill them.
 
 ```sh
-uv --no-config sync --locked
-uv --no-config run pytest --cov
-uv --no-config run ruff check .
-uv --no-config run ruff format --check .
-uv --no-config run ty check .
+python3 scripts/dev_update.py
 ```
 
-The ordinary test suite stubs reviewer calls. Native Codex discovery testing is opt-in: `YSK_TEST_NATIVE_CODEX=1` enables a test that temporarily installs the plugin under an isolated `CODEX_HOME`. Leave it unset when plugin installation is not authorized.
+The script needs Git, an authenticated Codex CLI, and [uv](https://docs.astral.sh/uv/).
+It fetches your branch's tracked upstream and merges new commits when possible,
+temporarily saving and restoring staged, unstaged, and untracked work. A conflicting
+upstream merge is aborted and your work restored. If your local edits conflict
+with a successful merge, the script stops with the edits retained in a Git stash
+and instructions to inspect the conflict. It never installs after a merge or
+validation failure.
 
-To install from a working checkout, build a bundle first:
+It installs the locked development dependencies, runs tests, lint, formatting,
+type and whitespace checks, and builds a separate plugin bundle. The bundle gets
+a version such as `0.3.0-dev.gabc123…` based on its contents; published version files
+in the checkout are not changed.
+
+After validation, it replaces the existing `you-should-know@you-should-know`
+installation and marketplace registration with the local bundle. This handles
+switching from the GitHub installation as well as subsequent development updates,
+without leaving two copies enabled. Other marketplaces are untouched. Your notes
+and YSK `config.toml` remain in their existing data directory. A failed installation
+attempts to restore the previous files from a local backup; it prints the backup
+location and retains it if restoration is needed. Restoration uses the saved local
+files rather than relying on a GitHub download.
+
+Reopen the Codex client afterward and open `/hooks` to review and trust the four hooks. A local
+development installation stays on the local bundle until you run the script again.
+Use this script for further updates instead of the GitHub update commands above.
+
+To fetch, merge, test, and build while Codex is still open, without changing its
+installed plugin:
 
 ```sh
-python3 scripts/package_plugin.py
-codex plugin marketplace add "$(pwd)/dist/you-should-know"
-codex plugin add you-should-know@you-should-know
+python3 scripts/dev_update.py --prepare-only
 ```
 
-The local bundle includes runtime files, documentation, and the license. It excludes development dependencies, local state, and Git history. Rebuilding replaces only output marked as belonging to this builder. Use a separate `CODEX_HOME` when testing an installation you want to keep separate from your normal profile.
+Add `--no-fetch` to use the checkout as-is without checking or merging upstream.
+The script uses the current `CODEX_HOME`, normally `~/.codex`; setting another
+directory selects another Codex installation profile. It refuses to replace hook
+files while a standalone Codex CLI process owned by your user is running. It
+ignores persistent `codex app-server` services and `codex-code-mode-host`, which can
+remain after the app closes. It cannot detect whether an app chat window is open.
+
+The ordinary test suite stubs reviewer calls. Native Codex discovery testing is
+opt-in: `YSK_TEST_NATIVE_CODEX=1` enables a test that temporarily installs the plugin
+under an isolated `CODEX_HOME`. No test makes a reviewer model call.
+
+For a bundle alone, `python3 scripts/package_plugin.py` remains available. Bundles
+include runtime files, documentation, and the license, excluding development
+dependencies, local state, and Git history. Development bundles live under
+`dist/development/`; keep the installed bundle there because the local marketplace
+points to it.
 
 `.codex-plugin/plugin.json` declares the native Codex skill and hooks. `.agents/plugins/marketplace.json` declares the marketplace. Keep the native format: Codex 0.162.1 skips plugin hooks when a portable root `plugin.json` is present.
 

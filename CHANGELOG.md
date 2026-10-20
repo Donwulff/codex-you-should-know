@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `scripts/dev_update.py` to merge tracked upstream changes, preserve local edits, run validation, build a versioned development bundle, and switch an existing GitHub or local installation to that bundle. Installation failures attempt restoration from a local backup; running standalone Codex CLI sessions prevent replacement of their hook files. Persistent app-server and code-mode-host services do not block updates.
 - Recorded the requested reviewer model and its selection source for each model call in `status`, with usage totals grouped by model and source. Review and confirmation calls retain their own model choices. Older records and unreported CLI defaults remain unknown rather than receiving inferred model names.
 - Added optional `review_instructions` to focus initial reviews without replacing evidence validation or confirmation, and documented how to compare models and prompts using a frozen transcript and separate state directories.
 
@@ -14,6 +15,7 @@
 
 ### Fixed
 
+- Made native discovery testing opt-in as documented, so ordinary development validation does not install test plugins.
 - Review a changed, completed turn even when a recent background review is still on cooldown. Previously, a review could suppress ongoing work and then skip its finished result. Call budgets, unchanged-excerpt detection, and `final_check = false` still apply.
 
 ## [0.3.0] - 2026-10-15
