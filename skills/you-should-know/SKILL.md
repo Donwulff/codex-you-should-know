@@ -25,17 +25,21 @@ Use the command that matches the request:
 
 | Request | CLI arguments |
 | --- | --- |
-| Show open notes | `notes` |
+| Show open notes and all candidates | `notes` |
 | Include known and dismissed notes | `notes --all` |
+| Limit notes and candidates to a working directory | `notes --cwd PATH` |
 | Explain a note | `show ID` |
 | Mark a note as already known | `know ID` |
 | Dismiss a note | `dismiss ID` |
-| Inspect configuration and check status | `status` |
+| Inspect configuration and executed check status | `status` |
+| Show more executed checks | `status --limit N` |
+| Include skipped cadence and cooldown checks | `status --skipped` |
+| Limit status to a working directory | `status --cwd PATH` |
 | Check a specified transcript now | `check --transcript PATH --session SESSION` |
 
 Use the note identifier returned by the CLI. When explaining a note, distinguish its supporting transcript evidence from the reviewer's inference. A note is advisory; it does not authorize a code change or a new investigation.
 
-Findings remain hidden candidates until a separate confirmation checks subsequent work and disclosure. `status` reports pending, suppressed, and withdrawn candidate counts and reasons, recent outcomes, reported token usage, errors, latency, and hook sightings. An unconfirmed candidate is not a verified note. The default budget is 30 model calls per session per rolling hour, including confirmations; an explicit legacy lifetime limit still applies. Inactive state expires after 30 days by default.
+Potential findings remain unconfirmed candidates until a separate review checks subsequent work and disclosure. `notes` lists open notes and every candidate in compact form, including pending candidates that never received a later confirmation. `status` reports pending, suppressed, and withdrawn candidate counts and reasons, recent executed check outcomes, reported token usage, errors, latency, and hook sightings. `recent_checks` omits skipped cadence and cooldown attempts unless `--skipped` is passed; executed rows include linked candidate or note topic and summary when those were recorded. An unconfirmed candidate is not a verified note. The default budget is 30 model calls per session per rolling hour, including confirmations; an explicit legacy lifetime limit still applies. Inactive state expires after 30 days by default.
 
 `recent_checks` records the requested model ID and its source (`config`, `hook`, or `argument`) for model calls. `model_usage` groups calls and tokens by model and source. A `cli_default` source with a null model means the reviewer CLI chose without reporting its model; null model metadata in older records is unknown. Do not infer those model IDs from the current chat or configuration. Review and confirmation can use different models if the chat's selection changes between checks. Optional `review_instructions` adds focus to initial reviews without replacing evidence or confirmation requirements.
 

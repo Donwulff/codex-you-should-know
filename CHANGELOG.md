@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `notes --cwd` and `status --cwd` to limit listings to one working directory, and included a compact list of every candidate (status, reason, topic, summary, timestamps, directory) in `notes` so pending findings remain visible if their session is not resumed.
+- Added `status --limit` and `status --skipped`. `recent_checks` now defaults to executed checks and includes linked candidate or note topic and summary when those were recorded. Cadence and cooldown skips are available with `--skipped`.
 - Added `scripts/dev_update.py` to merge tracked upstream changes, preserve local edits, run validation, build a versioned development bundle, and switch an existing GitHub or local installation to that bundle. Installation failures attempt restoration from a local backup; running standalone Codex CLI sessions prevent replacement of their hook files. Persistent app-server and code-mode-host services do not block updates.
 - Recorded the requested reviewer model and its selection source for each model call in `status`, with usage totals grouped by model and source. Review and confirmation calls retain their own model choices. Older records and unreported CLI defaults remain unknown rather than receiving inferred model names.
 - Added optional `review_instructions` to focus initial reviews without replacing evidence validation or confirmation, and documented how to compare models and prompts using a frozen transcript and separate state directories.

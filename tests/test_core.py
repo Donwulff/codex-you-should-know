@@ -366,7 +366,7 @@ def test_busy_worker_does_not_spend_check_budget(state, transcript, monkeypatch)
     assert result["reason"] == "review is busy"
     assert result["latency"] >= 0
     assert result["usage"] == {}
-    recorded = state.diagnostics()["recent_checks"][0]
+    recorded = state.diagnostics(include_skipped=True)["recent_checks"][0]
     assert recorded["outcome"] == "skipped"
     assert recorded["reason"] == "review is busy"
     assert recorded["latency"] == result["latency"]
@@ -437,7 +437,10 @@ def test_hook_protocol_and_cli_note_actions(state, transcript, finding, monkeypa
     assert set(warning) == {"systemMessage"}
     assert finding.summary in warning["systemMessage"]
     assert main([*prefix, "notes"]) == 0
-    identifier = json.loads(capsys.readouterr().out)["notes"][0]["id"]
+    listed = json.loads(capsys.readouterr().out)
+    identifier = listed["notes"][0]["id"]
+    assert listed["candidates"][0]["status"] == "confirmed"
+    assert listed["candidates"][0]["topic"] == finding.topic
     assert main([*prefix, "show", identifier]) == 0
     assert json.loads(capsys.readouterr().out)["evidence"] == finding.evidence
     assert main([*prefix, "know", identifier]) == 0

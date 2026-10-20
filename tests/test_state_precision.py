@@ -279,6 +279,12 @@ def test_telemetry_counts_calls_without_usage_and_excludes_noop_checks(tmp_path)
     assert report["output_tokens"] == 0
     assert [check["model_called"] for check in report["recent_checks"]] == [
         False,
+        True,
+        True,
+    ]
+    skipped = state.diagnostics(include_skipped=True)
+    assert [check["model_called"] for check in skipped["recent_checks"]] == [
+        False,
         False,
         True,
         True,
@@ -350,8 +356,12 @@ def test_model_usage_groups_calls_and_excludes_skipped_checks(tmp_path):
             "usage_unknown_calls": 1,
         }
     ]
-    assert report["recent_checks"][0]["model"] is None
-    assert report["recent_checks"][0]["model_source"] is None
+    assert report["recent_checks"][0]["model"] == "gpt-6-astra"
+    assert report["recent_checks"][0]["model_source"] == "hook"
+    skipped = state.diagnostics(include_skipped=True)
+    assert skipped["recent_checks"][0]["outcome"] == "skipped"
+    assert skipped["recent_checks"][0]["model"] is None
+    assert skipped["recent_checks"][0]["model_source"] is None
     state.close()
 
 
@@ -588,3 +598,152 @@ def test_config_accepts_additional_review_focus(tmp_path):
     assert load_config(tmp_path).review_instructions == (
         "Check recurring costs.\nExplain the effect in plain language.\n"
     )
+
+
+def test_notes_list_compact_candidates_and_filter_by_cwd(tmp_path):
+    state = State(tmp_path)
+    project = str(tmp_path / "project")
+    other = str(tmp_path / "other")
+    state.hook_seen("here", "Stop", project)
+    state.hook_seen("there", "Stop", other)
+    here = state.candidate("here", finding("here topic"), 100, "source", 1)
+    there = state.candidate("there", finding("there topic"), 101, "source", 1)
+    note_id = state.save("here", finding("published note"), 102)
+    assert note_id is not None
+    listed = state.candidates()
+    assert [item["id"] for item in listed] == [there, here]
+    assert listed[0]["cwd"] == other
+    assert listed[0]["topic"] == "there topic"
+    assert "evidence" not in listed[0]
+    assert "transcript" not in listed[0]
+    assert "explanation" not in listed[0]
+    assert [item["id"] for item in state.candidates(cwd=project)] == [here]
+    notes = state.notes(cwd=project)
+    assert [item["id"] for item in notes] == [note_id]
+    assert notes[0]["cwd"] == project
+    assert state.notes(cwd=other) == []
+    state.resolve_candidate(here, "withdrawn", "assistant disclosed it", 110)
+    withdrawn = state.candidates(cwd=project)
+    assert withdrawn[0]["status"] == "withdrawn"
+    assert withdrawn[0]["reason"] == "assistant disclosed it"
+    state.close()
+
+
+def test_recent_checks_omit_skipped_and_attach_candidate_results(tmp_path):
+    state = State(tmp_path)
+    project = str(tmp_path / "project")
+    state.hook_seen("session", "Stop", project)
+    identifier = state.candidate("session", finding(), 100, "source", 1)
+    note_id = state.save("session", finding("published"), 101)
+    state.record_check(
+        "session",
+        "PostToolUse",
+        "pending",
+        100,
+        1.2,
+        {"input_tokens": 10, "output_tokens": 2},
+        reason="awaiting confirmation",
+        candidate_id=identifier,
+        model_called=True,
+        model="gpt-6.1-sol",
+        model_source="hook",
+    )
+    state.record_check("session", "PostToolUse", "skipped", 101, 0, reason="cadence or cooldown")
+    state.record_check(
+        "session",
+        "Stop",
+        "finding",
+        102,
+        0.8,
+        {"input_tokens": 5, "output_tokens": 1},
+        phase="confirmation",
+        candidate_id=identifier,
+        note_id=note_id,
+        model_called=True,
+        model="gpt-6.1-sol",
+        model_source="hook",
+    )
+    limited = state.diagnostics(check_limit=1)
+    assert [row["outcome"] for row in limited["recent_checks"]] == ["finding"]
+    assert limited["recent_checks"][0]["note"]["id"] == note_id
+    assert limited["recent_checks"][0]["candidate"]["topic"] == "Topic A"
+    assert limited["recent_checks"][0]["cwd"] == project
+    default = state.diagnostics()
+    assert [row["outcome"] for row in default["recent_checks"]] == ["finding", "pending"]
+    skipped = state.diagnostics(include_skipped=True)
+    assert [row["outcome"] for row in skipped["recent_checks"]] == ["finding", "skipped", "pending"]
+    missing = state.diagnostics(cwd=str(tmp_path / "missing"))
+    assert missing["recent_checks"] == []
+    assert missing["total_checks"] == 0
+    matched = state.diagnostics(cwd=project)
+    assert matched["total_checks"] == 3
+    assert matched["candidates"]["pending"] == 1
+    state.close()
+
+
+def test_cwd_status_only_includes_relevant_session_and_project_mutes(tmp_path):
+    state = State(tmp_path)
+    project = str(tmp_path / "project")
+    other = str(tmp_path / "other")
+    state.hook_seen("here", "Stop", project)
+    state.hook_seen("there", "Stop", other)
+    for session_id, directory in (("here", project), ("there", other)):
+        state.mute(session_id)
+        state.mute(session_id, directory, project=True)
+    scoped = state.diagnostics(cwd=project)
+    assert {(item["scope"], item["target"]) for item in scoped["mutes"]} == {
+        ("session", "here"),
+        ("project", project),
+    }
+    assert len(state.diagnostics()["mutes"]) == 4
+    assert state.diagnostics(cwd=str(tmp_path / "missing"))["mutes"] == []
+    unused = str(tmp_path / "unused")
+    state.mute("no-session", unused, project=True)
+    assert [item["target"] for item in state.diagnostics(cwd=unused)["mutes"]] == [unused]
+    state.close()
+
+
+@pytest.mark.parametrize("cwd", ["", ".", "subdir/.."])
+def test_relative_cwd_filters_agree_across_listings(tmp_path, monkeypatch, cwd):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    state = State(tmp_path / "state")
+    state.hook_seen("here", "Stop", str(project))
+    state.hook_seen("there", "Stop", str(tmp_path / "other"))
+    for session_id in ("here", "there"):
+        state.candidate(session_id, finding(session_id), 100, "source", 1)
+        state.save(session_id, finding(f"note {session_id}"), 100)
+        state.record_check(session_id, "Stop", "clear", 100, 1)
+    assert [item["session_id"] for item in state.status(cwd=cwd)] == ["here"]
+    assert [item["session_id"] for item in state.notes(cwd=cwd)] == ["here"]
+    assert [item["session_id"] for item in state.candidates(cwd=cwd)] == ["here"]
+    assert state.diagnostics(cwd=cwd)["total_checks"] == 1
+    state.close()
+
+
+def test_check_result_links_migrate_without_guessing_legacy_associations(tmp_path):
+    state = State(tmp_path)
+    state.record_check("session", "Stop", "clear", 100, 1, model_called=True)
+    with state.connection:
+        state.connection.execute("ALTER TABLE checks DROP COLUMN candidate_id")
+        state.connection.execute("ALTER TABLE checks DROP COLUMN note_id")
+    state.close()
+
+    reopened = State(tmp_path)
+    legacy = reopened.diagnostics()["recent_checks"][0]
+    assert legacy["candidate_id"] is None
+    assert legacy["note_id"] is None
+    assert legacy["candidate"] is None
+    assert legacy["note"] is None
+    candidate_id = reopened.candidate("session", finding(), 101, "source", 1)
+    note_id = reopened.publish_candidate(candidate_id, 102)
+    assert note_id is not None
+    reopened.record_check(
+        "session", "Stop", "finding", 102, 1, candidate_id=candidate_id, note_id=note_id
+    )
+    latest = reopened.diagnostics()["recent_checks"][0]
+    assert latest["candidate"]["id"] == candidate_id
+    assert latest["note"]["id"] == note_id
+    assert reopened.diagnostics()["total_checks"] == 2
+    reopened.close()

@@ -42,11 +42,11 @@ To inspect review status, ask Codex:
 You Should Know status
 ```
 
-An empty check history is normal immediately after installation. After you finish a turn, `status` shows recent check outcomes, candidate counts and reasons, error counts, latency, and reported token usage. It also shows when each hook last ran and warns when a hook has never run while others have. A missing hook may be untrusted or may not have had an opportunity to run yet. A completed review can return no finding.
+An empty check history is normal immediately after installation. After you finish a turn, `status` shows recent executed check outcomes, candidate counts and reasons, error counts, latency, and reported token usage. Skipped cadence and cooldown attempts are omitted unless you ask for `--skipped`. It also shows when each hook last ran and warns when a hook has never run while others have. A missing hook may be untrusted or may not have had an opportunity to run yet. A completed review can return no finding.
 
 Token totals include usage reported before a result failed validation. `usage_unknown_calls` counts calls whose usage was unavailable; those calls are not known to have used zero tokens. Legacy history predating these counters does not acquire invented usage or call counts.
 
-`recent_checks` includes the model ID requested for each model call and `model_source`: `config` for the plugin setting, `hook` for the active chat's model, or `argument` for a manual `--model` option. `model_usage` totals calls, errors, and tokens by model and source. Review and confirmation calls are recorded separately, so a model change between them remains visible. Older records and checks with no model call have a null model. If the reviewer CLI chooses its own model, the source is `cli_default` and the model stays null because that CLI does not report its choice.
+`recent_checks` defaults to the newest 20 checks that actually ran, including unchanged excerpts, clear results, findings, pending or withdrawn candidates, and errors. Cadence, cooldown, budget, disabled, and busy-reviewer skips are omitted. Each row includes token usage when a model was called. When the check created or resolved a candidate or note, the row also includes that item's topic and summary. Use `status --skipped` to include skipped attempts, `status --limit N` to change how many rows are returned, and `status --cwd PATH` to limit the report to one working directory. `model_source` is `config` for the plugin setting, `hook` for the active chat's model, or `argument` for a manual `--model` option. `model_usage` totals calls, errors, and tokens by model and source. Review and confirmation calls are recorded separately, so a model change between them remains visible. Older records and checks with no model call have a null model. If the reviewer CLI chooses its own model, the source is `cli_default` and the model stays null because that CLI does not report its choice.
 
 ## Update
 
@@ -171,13 +171,17 @@ The CLI uses the same data directory as the installed plugin:
 ```sh
 python3 scripts/you_should_know.py notes
 python3 scripts/you_should_know.py notes --all
+python3 scripts/you_should_know.py notes --cwd .
 python3 scripts/you_should_know.py show 8f31a7c62b40
 python3 scripts/you_should_know.py know 8f31a7c62b40
 python3 scripts/you_should_know.py dismiss 8f31a7c62b40
 python3 scripts/you_should_know.py status
+python3 scripts/you_should_know.py status --limit 50
+python3 scripts/you_should_know.py status --skipped
+python3 scripts/you_should_know.py status --cwd .
 ```
 
-The identifier `8f31a7c62b40` is illustrative; replace it with an identifier from `notes`. The list contains up to 100 recent open notes, or 100 notes of any status with `--all`. Reading a note leaves its status unchanged.
+The identifier `8f31a7c62b40` is illustrative; replace it with an identifier from `notes`. The notes list contains up to 100 recent open notes, or 100 notes of any status with `--all`. It also lists every candidate in compact form (identifier, status, reason, topic, summary, timestamps, and working directory), including pending findings that have not been confirmed yet. `--cwd PATH` limits both lists to sessions from that directory. Reading a note leaves its status unchanged.
 
 To request a check immediately, supply a Codex rollout transcript and session identifier. Manual checks work inside noninteractive sessions and bypass the tool cadence, cooldown, and model-call limits. They still require confirmation before returning a note and can make two model calls:
 
@@ -251,7 +255,7 @@ Checks retain the first three user messages and recent transcript activity withi
 | A note reply reaches the main agent | Check `status` for a missing `UserPromptSubmit` hook. Trust the reply hook, wait for the end-of-turn menu, and use `ysk N` within the reply window. Bare answers pass through when Codex may be waiting for your answer. |
 | A hook is marked **modified** after an update | Review and trust the new definition through `/hooks`. |
 | A check reports an authentication failure | Run `codex login`, then try another check. |
-| No notes appear after a successful check | Inspect candidate counts and reasons in `status`. A concern may await confirmation, be suppressed as ongoing work or a duplicate, or have been withdrawn after confirmation. A clear check found nothing to report. |
+| No notes appear after a successful check | Inspect candidates in `notes` and counts or reasons in `status`. A concern may await confirmation, be suppressed as ongoing work or a duplicate, or have been withdrawn after confirmation. A clear check found nothing to report. |
 
 ## Development
 

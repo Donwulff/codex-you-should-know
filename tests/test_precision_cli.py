@@ -1,5 +1,6 @@
 import io
 import json
+import time
 from dataclasses import replace
 
 import pytest
@@ -584,3 +585,73 @@ def test_error_usage_totals_distinguish_known_usage_from_unknown(
     assert status["output_tokens"] == (45 if reported else 0)
     assert status["model_calls"] == 1
     assert status["usage_unknown_calls"] == (0 if reported else 1)
+
+
+def test_notes_cli_includes_candidates_and_cwd_filter(state, finding, capsys):
+    project = str(state.directory / "app")
+    state.hook_seen("s", "Stop", project)
+    identifier = state.candidate("s", finding, 100, "source", 1)
+    assert cli.main(["notes"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["notes"] == []
+    assert payload["candidates"][0]["id"] == identifier
+    assert payload["candidates"][0]["topic"] == finding.topic
+    assert payload["candidates"][0]["cwd"] == project
+    assert "evidence" not in payload["candidates"][0]
+    assert cli.main(["notes", "--cwd", project]) == 0
+    assert json.loads(capsys.readouterr().out)["candidates"][0]["id"] == identifier
+    assert cli.main(["notes", "--cwd", str(state.directory / "other")]) == 0
+    assert json.loads(capsys.readouterr().out) == {"notes": [], "candidates": []}
+
+
+def test_status_cli_hides_skipped_checks_unless_requested(state, finding, capsys):
+    project = str(state.directory / "app")
+    now = time.time()
+    state.hook_seen("s", "Stop", project)
+    identifier = state.candidate("s", finding, now, "source", 1)
+    state.record_check("s", "PostToolUse", "clear", now, 1, model_called=True)
+    state.record_check("s", "PostToolUse", "skipped", now + 1, 0, reason="cadence or cooldown")
+    state.record_check("s", "Stop", "pending", now + 2, 1, candidate_id=identifier)
+    assert cli.main(["status"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert [row["outcome"] for row in status["recent_checks"]] == ["pending", "clear"]
+    assert status["recent_checks"][0]["candidate"]["topic"] == finding.topic
+    assert cli.main(["status", "--skipped"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert [row["outcome"] for row in status["recent_checks"]] == ["pending", "skipped", "clear"]
+    assert cli.main(["status", "--limit", "1"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert [row["outcome"] for row in status["recent_checks"]] == ["pending"]
+    assert cli.main(["status", "--cwd", project]) == 0
+    assert json.loads(capsys.readouterr().out)["total_checks"] == 3
+    assert cli.main(["status", "--cwd", str(state.directory / "other")]) == 0
+    assert json.loads(capsys.readouterr().out)["total_checks"] == 0
+
+
+def test_status_limit_rejects_non_positive_values():
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args(["status", "--limit", "0"])
+
+
+def test_executed_check_attaches_candidate_and_note_summaries(
+    state, transcript, finding, monkeypatch
+):
+    def reviewer(prompt, schema, **kwargs):
+        if schema == cli.SCHEMA:
+            return response(finding)
+        return {"confirmed": True, "reason": "Still unresolved", "evidence": finding.evidence}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    config = replace(Config(), every_n_tools=1)
+    pending = cli.check(state, config, "s", transcript, "PostToolUse", "gpt-6.1-sol")
+    assert pending["status"] == "pending"
+    row = state.diagnostics()["recent_checks"][0]
+    assert row["outcome"] == "pending"
+    assert row["candidate"]["topic"] == finding.topic
+    assert row["candidate"]["summary"] == finding.summary
+    assert row["note"] is None
+    assert cli.check(state, config, "s", transcript, "Stop", "gpt-6.1-sol")["status"] == "finding"
+    row = state.diagnostics()["recent_checks"][0]
+    assert row["outcome"] == "finding"
+    assert row["note"]["summary"] == finding.summary
+    assert row["candidate"]["status"] == "confirmed"
