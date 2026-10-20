@@ -547,6 +547,8 @@ def test_pruning_cannot_unlink_a_held_review_lock(tmp_path):
         "retention_days = 0",
         "reply_timeout_seconds = 0",
         "unknown = true",
+        "review_instructions = 3",
+        'review_instructions = "' + "x" * 8001 + '"',
     ],
 )
 def test_new_configuration_rejects_invalid_values_with_file_path(tmp_path, text):
@@ -564,6 +566,7 @@ def test_new_configuration_defaults_and_explicit_lifetime_budget(tmp_path):
     assert config.retention_days == 30
     assert config.reply_timeout_seconds == 600
     assert not config.debug
+    assert config.review_instructions == ""
     (tmp_path / "config.toml").write_text(
         "max_checks_per_session = 12\nmax_checks_per_hour = 3\nfinal_check = false\n"
         "debug = true\nretention_days = 7\nreply_timeout_seconds = 60\n"
@@ -575,3 +578,13 @@ def test_new_configuration_defaults_and_explicit_lifetime_budget(tmp_path):
     assert config.debug
     assert config.retention_days == 7
     assert config.reply_timeout_seconds == 60
+
+
+def test_config_accepts_additional_review_focus(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        'review_instructions = """\n'
+        'Check recurring costs.\nExplain the effect in plain language.\n"""\n'
+    )
+    assert load_config(tmp_path).review_instructions == (
+        "Check recurring costs.\nExplain the effect in plain language.\n"
+    )

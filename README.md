@@ -204,6 +204,7 @@ final_check = true
 reply_timeout_seconds = 600
 retention_days = 30
 debug = false
+review_instructions = ""
 ```
 
 To keep the reviewer on a specific model, add a top-level setting such as `model = "gpt-6.1-sol"` to this plugin config file. This setting wins for automatic and manual checks, including over a manual `--model` argument. Without it, automatic checks use the model selected for the active chat, supplied by Codex in the hook's `model` field. Changing that chat with `/model` also changes its automatic reviewer model. Manual checks accept `--model gpt-6.1-sol` and do not read the model from the transcript.
@@ -211,6 +212,19 @@ To keep the reviewer on a specific model, add a top-level setting such as `model
 When neither the plugin config nor the invocation supplies a model, a separate Codex CLI process chooses one. The reviewer runs with `--ignore-user-config`, so that fallback skips `~/.codex/config.toml`; it does not inherit the model from another running chat. The plugin does not pin a fallback model ID. Both review calls request `low` reasoning effort independently of the main chat's effort.
 
 Set `enabled = false` to disable the hooks globally. Add `max_checks_per_session = 30` only if you also want a lifetime limit; remove that setting from an older configuration to use the rolling limit alone.
+
+To give the observer an additional focus, set `review_instructions` (up to 8,000 characters):
+
+```toml
+review_instructions = """
+Additionally, look for recurring costs and configuration that leaves requested
+features unavailable. Explain the practical effect in plain language.
+"""
+```
+
+This supplements the initial review prompt. It does not replace the evidence requirements, output schema, tool restrictions, or separate confirmation. The default prompt includes a short final reminder after the conversation; a longer prompt or repeated instructions is not a guarantee of better findings.
+
+For comparisons, freeze a copy of the relevant rollout and use a fresh `--data-dir` for each model or prompt variant. Put each variant's `config.toml` there, use the same frozen transcript, session identifier, and context limit, then compare findings, false alarms, tokens, and latency. Separate state directories prevent known topics and earlier pending candidates from influencing the comparison. Include examples that should produce no note as well as a genuine oversight. Replays consume model usage; the ordinary test suite does not run them.
 
 Set `debug = true` or start Codex with `YSK_DEBUG=1` to show a one-line message for each check with its outcome, latency, and reported token usage. Configuration errors include the file path and appear once per session for each changed configuration file, rather than after every tool.
 

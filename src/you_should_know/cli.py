@@ -160,7 +160,12 @@ def check(
             if not candidate:
                 if not budget():
                     return outcome("skipped", "budget exhausted")
-                prompt = make_prompt(transcript, state.previous(), state.known_topics())
+                prompt = make_prompt(
+                    transcript,
+                    state.previous(),
+                    state.known_topics(),
+                    review_instructions=config.review_instructions,
+                )
                 remaining = max(1, deadline - time.monotonic())
                 state.begin(session_id, time.time())
                 model_called = True

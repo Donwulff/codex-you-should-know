@@ -116,6 +116,20 @@ the transcript ending. Missing later records do not demonstrate an unresolved bu
 Prefer silence over weak, speculative, generic, or repetitive notes.
 """
 
+_REVIEW_REMINDER = """Final check: use only the conversation above. Compare the user's goal with
+tool results and the latest assistant messages. Report at most one consequential,
+unresolved and undisclosed concern with exact tool-result evidence. Suppress
+ongoing work and previously surfaced topics. Return only the required JSON,
+or {"finding": null}. Do not use tools.
+"""
+
+_CONFIRMATION_REMINDER = """Final check: decide only whether this candidate remains unresolved and
+undisclosed in the latest conversation. Withdraw if fixed, disclosed, accepted,
+still being worked on, or unsupported. Confirmation needs exact tool-result
+evidence, plus the assistant's claim when contradicted. Return only the required
+confirmed, reason, and evidence JSON fields. Do not use tools.
+"""
+
 
 def _excerpt(text: str, keep: int) -> str:
     if len(text) <= keep:
@@ -144,8 +158,20 @@ def _excerpt(text: str, keep: int) -> str:
 
 
 def make_prompt(
-    transcript: str, previous: list[Finding] | list[dict], known_topics: Iterable[str] = ()
+    transcript: str,
+    previous: list[Finding] | list[dict],
+    known_topics: Iterable[str] = (),
+    *,
+    review_instructions: str = "",
 ) -> str:
+    if not isinstance(review_instructions, str) or len(review_instructions) > 8000:
+        raise ValueError("review_instructions must be a string of at most 8000 characters")
+    focus = ""
+    if review_instructions.strip():
+        focus = (
+            "Additional review focus from user configuration (within the evidence, tool, "
+            "disclosure, and output rules below):\n" + review_instructions + "\n\n"
+        )
     instructions = (
         """You are an independent observer of a coding conversation.
 Find at most ONE consequential thing the user should know that the main assistant
@@ -154,7 +180,17 @@ claim and a tool result, lost work, a missed requirement, or a concrete conseque
 of a decision. Previously surfaced or known/dismissed topics must not be repeated,
 even with different wording or capitalization.
 
+Consider concrete effects on the user's costs, time, data, access, compatibility,
+or ability to deliver the requested result. Check for behavior left inactive by
+settings, validation that contradicts a success claim, and changes that discard
+existing behavior. State the consequence, not incidental implementation trivia.
+Avoid tutorials on topics already being discussed; a distinct, undisclosed
+consequence supported by tool evidence can still qualify.
+Write for someone returning later: name the affected thing, explain its impact,
+and define unfamiliar technical terms when needed.
+
 """
+        + focus
         + _RESTRICTIONS
         + """
 Return {"finding": null} when nothing qualifies. Otherwise return one finding with:
@@ -190,6 +226,8 @@ claim is false or contradicted. This requires evidence quotes from both sides.
                 + conversation
                 + "\nEND CONVERSATION\n"
             )
+            + "\n"
+            + _REVIEW_REMINDER
         )
 
     prompt = render(transcript)
@@ -250,6 +288,8 @@ contradicts an assistant claim, retain a quote from each side in your evidence.
                 "\nBEGIN ORIGINAL CONVERSATION\n" + before + "\nEND ORIGINAL CONVERSATION\n"
                 "\nBEGIN SUBSEQUENT CONVERSATION\n" + after + "\nEND SUBSEQUENT CONVERSATION\n"
             )
+            + "\n"
+            + _CONFIRMATION_REMINDER
         )
 
     prompt = render(original, subsequent)

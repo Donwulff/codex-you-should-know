@@ -129,6 +129,19 @@ def test_confirmation_records_its_own_model_after_chat_model_changes(
     assert phases == {"review": "gpt-6.1-sol", "confirmation": "gpt-6-astra"}
 
 
+def test_configured_review_focus_reaches_reviewer(state, transcript, monkeypatch):
+    focus = "Pay particular attention to recurring usage costs."
+
+    def reviewer(prompt, schema, **kwargs):
+        assert focus in prompt
+        assert "Every finding must be demonstrated by a tool result" in prompt
+        return {"finding": None}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    config = replace(Config(), review_instructions=focus)
+    assert cli.check(state, config, "s", transcript, "Stop")["status"] == "clear"
+
+
 @pytest.mark.parametrize(
     "question",
     [

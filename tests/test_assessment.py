@@ -251,6 +251,36 @@ def test_confirmation_prompt_keeps_new_context_and_explicit_disclosure_check():
     assert "OLD" in prompt and "NEW" in prompt
 
 
+def test_custom_review_focus_and_final_reminder_survive_context_clipping():
+    transcript = frame("tool result: id=c", "BEGIN\n" + "漢" * 150_000 + "\nEND")
+    focus = "Pay particular attention to recurring usage costs."
+    prompt = make_prompt(transcript, [], review_instructions=focus)
+    assert focus in prompt
+    assert len(prompt.encode()) <= MAX_PROMPT_BYTES
+    assert "Every finding must be demonstrated by a tool result" in prompt
+    assert prompt.index(focus) < prompt.index("BEGIN CONVERSATION")
+    reminder = prompt.rsplit("\nEND CONVERSATION\n", 1)[1]
+    assert "Final check:" in reminder
+    assert 'or {"finding": null}' in reminder
+
+
+def test_confirmation_reminder_follows_all_conversation_evidence():
+    prompt = make_confirmation_prompt(
+        Finding("topic", "summary", "explanation", ["old evidence"]),
+        "old evidence",
+        "new evidence",
+    )
+    reminder = prompt.rsplit("\nEND SUBSEQUENT CONVERSATION\n", 1)[1]
+    assert "Final check:" in reminder
+    assert "Withdraw if fixed, disclosed, accepted" in reminder
+
+
+@pytest.mark.parametrize("instructions", [None, 1, "x" * 8001], ids=["none", "number", "oversized"])
+def test_review_focus_rejects_invalid_or_oversized_instructions(instructions):
+    with pytest.raises(ValueError, match="review_instructions"):
+        make_prompt("conversation", [], review_instructions=instructions)
+
+
 def test_review_budget_clipping_retains_valid_sources_and_tool_evidence():
     transcript = (
         frame("user", "INITIAL REQUEST\n" + "漢" * 100_000)
