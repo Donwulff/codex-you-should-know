@@ -26,7 +26,6 @@ from .transcript import (
     TranscriptError,
     last_assistant_message,
     read_since,
-    read_since_snapshot,
     read_snapshot,
 )
 
@@ -230,9 +229,7 @@ def check(
                 return hold(candidate, "check time limit reached")
             if not budget():
                 return hold(candidate, "budget exhausted")
-            subsequent, confirmation_offset = read_since_snapshot(
-                transcript_path, candidate["offset"], config.max_context_chars
-            )
+            subsequent = read_since(transcript_path, candidate["offset"], config.max_context_chars)
             finding = Finding(
                 **{key: candidate[key] for key in ("topic", "summary", "explanation", "evidence")}
             )
@@ -252,14 +249,8 @@ def check(
                 candidate["transcript"] + "\n\n" + subsequent,
                 assistant_claim=candidate["assistant_claim"],
             )
-            if confirmed and read_since(
-                transcript_path, confirmation_offset, config.max_context_chars
-            ):
-                state.finish(session_id, time.time(), digest)
-                return hold(
-                    candidate,
-                    "New messages or tool activity arrived during confirmation; will recheck",
-                )
+            # Confirmation applies to the supplied conversation. Later activity alone
+            # neither invalidates its result nor requires another model call.
             if confirmed:
                 identifier = state.publish_candidate(candidate["id"], time.time(), notify=not force)
             else:

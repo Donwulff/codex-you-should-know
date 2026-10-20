@@ -322,7 +322,13 @@ def test_stop_withdraws_fixed_or_disclosed_candidate(
             },
         ]
     )
-    monkeypatch.setattr(backend, "review", lambda *a, **k: next(replies))
+
+    def reviewer(prompt, schema_path, **kwargs):
+        if schema_path == cli.CONFIRMATION_SCHEMA:
+            assert followup in prompt
+        return next(replies)
+
+    monkeypatch.setattr(backend, "review", reviewer)
     config = replace(Config(), every_n_tools=1)
     assert cli.check(state, config, "s", transcript, "PostToolUse")["status"] == "pending"
     append(transcript, "message", role="assistant", content=followup)
@@ -363,40 +369,21 @@ def test_confirmation_keeps_both_sides_of_assistant_claim(state, transcript, fin
     assert state.notes() == []
 
 
-def test_work_during_confirmation_keeps_candidate_for_rechecking(
-    state, transcript, finding, monkeypatch
-):
-    def reviewer(prompt, schema_path, **kwargs):
-        if schema_path == cli.SCHEMA:
-            return response(finding)
-        append(transcript, "message", role="assistant", content="I restored all old settings.")
-        return {"confirmed": True, "reason": "Unresolved.", "evidence": finding.evidence}
-
-    monkeypatch.setattr(backend, "review", reviewer)
-    result = cli.check(state, Config(), "s", transcript, "Stop")
-    assert result["status"] == "pending"
-    assert "recheck" in result["reason"]
-    assert state.pending_candidate("s")["id"] == result["candidate_id"]
-    assert state.notes() == []
-    assert state.session("s").attempts == 2
-
-
 @pytest.mark.parametrize(
-    ("kind", "payload", "confirm_after_update"),
+    ("kind", "payload"),
     [
-        ("message", {"role": "assistant", "content": "Now checking the documentation."}, True),
-        ("message", {"role": "user", "content": "Also check the README."}, True),
+        ("message", {"role": "assistant", "content": "Now checking the documentation."}),
+        ("message", {"role": "user", "content": "Also check the README."}),
         (
             "function_call",
             {"name": "list_tests", "call_id": "next", "arguments": '{"path":"new-tests"}'},
-            True,
         ),
-        ("function_call_output", {"call_id": "next", "output": "All tests passed."}, True),
-        ("message", {"role": "assistant", "content": "I restored all old settings."}, False),
+        ("function_call_output", {"call_id": "next", "output": "All tests passed."}),
+        ("message", {"role": "assistant", "content": "I restored all old settings."}),
     ],
 )
-def test_confirmation_retries_same_candidate_with_new_context_at_turn_end(
-    state, transcript, finding, monkeypatch, kind, payload, confirm_after_update
+def test_new_activity_during_confirmation_does_not_override_approved_note(
+    state, transcript, finding, monkeypatch, kind, payload
 ):
     calls = []
 
@@ -404,93 +391,52 @@ def test_confirmation_retries_same_candidate_with_new_context_at_turn_end(
         calls.append(schema_path)
         if schema_path == cli.SCHEMA:
             return response(finding)
-        if len(calls) == 2:
-            assert "I will also check the README." in prompt
-            append(transcript, kind, **payload)
-            confirmed = True
-        else:
-            assert payload.get("content", payload.get("output", payload.get("arguments"))) in prompt
-            confirmed = confirm_after_update
-        return {
-            "confirmed": confirmed,
-            "reason": "Still unresolved." if confirmed else "The settings were restored.",
-            "evidence": finding.evidence if confirmed else [],
-        }
+        assert "I will also check the README." in prompt
+        append(transcript, kind, **payload)
+        return {"confirmed": True, "reason": "Still unresolved.", "evidence": finding.evidence}
 
     monkeypatch.setattr(backend, "review", reviewer)
-    now = [1000.0]
-    monkeypatch.setattr(cli.time, "time", lambda: now[0])
     config = replace(Config(), every_n_tools=1)
     first = cli.check(state, config, "s", transcript, "PostToolUse")
     append(transcript, "message", role="assistant", content="I will also check the README.")
-    now[0] += config.min_interval_seconds
-    raced = cli.check(state, config, "s", transcript, "PostToolUse")
-    assert raced["status"] == "pending"
-    assert raced["candidate_id"] == first["candidate_id"]
-    assert state.notes() == []
-    assert cli.notifications(state, "s") == {}
+    result = cli.check(state, config, "s", transcript, "Stop")
+    assert result["status"] == "finding"
+    assert result["candidate_id"] == first["candidate_id"]
+    assert result["reason"] == "Still unresolved."
+    assert len(state.notes()) == 1
+    assert state.pending_candidate("s") is None
+    assert state.session("s").attempts == 2
+    assert calls == [cli.SCHEMA, cli.CONFIRMATION_SCHEMA]
+    assert finding.summary in cli.notifications(state, "s")["systemMessage"]
     assert state.diagnostics()["recent_checks"][0]["phase"] == "confirmation"
 
-    reopened = State(state.directory)
-    try:
-        # Stop must retry even though the background confirmation just used the cooldown.
-        final = cli.check(reopened, config, "s", transcript, "Stop")
-        assert final["status"] == ("finding" if confirm_after_update else "withdrawn")
-        assert final["candidate_id"] == first["candidate_id"]
-        assert len(reopened.notes()) == int(confirm_after_update)
-        assert reopened.pending_candidate("s") is None
-        assert reopened.session("s").attempts == 3
-        assert calls == [cli.SCHEMA, cli.CONFIRMATION_SCHEMA, cli.CONFIRMATION_SCHEMA]
-    finally:
-        reopened.close()
 
-
-@pytest.mark.parametrize("limit", ["max_checks_per_hour", "max_checks_per_session"])
-def test_confirmation_race_retries_respect_call_limits(
-    state, transcript, finding, monkeypatch, limit
+def test_later_reviews_use_notes_to_avoid_repetition_without_updating_their_status(
+    state, transcript, finding, monkeypatch
 ):
     calls = []
 
     def reviewer(prompt, schema_path, **kwargs):
         calls.append(schema_path)
         if schema_path == cli.SCHEMA:
-            return response(finding)
-        if len(calls) == 2:
-            append(transcript, "function_call_output", call_id="next", output="All tests passed.")
+            if len(calls) == 1:
+                return response(finding)
+            assert finding.topic in prompt
+            assert finding.summary in prompt
+            assert '"status": "new"' in prompt
+            assert "I restored all old settings." in prompt
+            return {"finding": None}
         return {"confirmed": True, "reason": "Still unresolved.", "evidence": finding.evidence}
 
     monkeypatch.setattr(backend, "review", reviewer)
-    now = [1000.0]
-    monkeypatch.setattr(cli.time, "time", lambda: now[0])
-    config = replace(Config(), every_n_tools=1, min_interval_seconds=0, **{limit: 2})
-    first = cli.check(state, config, "s", transcript, "PostToolUse")
-    assert cli.check(state, config, "s", transcript, "PostToolUse")["status"] == "pending"
-    blocked = cli.check(state, config, "s", transcript, "Stop")
-    assert blocked["status"] == "pending"
-    assert blocked["reason"] == "budget exhausted"
-    assert blocked["candidate_id"] == first["candidate_id"]
-    assert len(calls) == 2
-    assert state.diagnostics()["model_calls"] == 2
-    now[0] += 3601
-    later = cli.check(state, config, "s", transcript, "Stop")
-    assert later["status"] == ("finding" if limit == "max_checks_per_hour" else "pending")
-    assert len(calls) == (3 if limit == "max_checks_per_hour" else 2)
-
-
-@pytest.mark.parametrize("metadata_type", ["token_usage_record", "turn_context"])
-def test_metadata_during_confirmation_does_not_postpone_note(
-    state, transcript, finding, monkeypatch, metadata_type
-):
-    def reviewer(prompt, schema_path, **kwargs):
-        if schema_path == cli.SCHEMA:
-            return response(finding)
-        with transcript.open("a") as stream:
-            stream.write(json.dumps({"type": metadata_type, "payload": {}}) + "\n")
-        return {"confirmed": True, "reason": "Still unresolved.", "evidence": finding.evidence}
-
-    monkeypatch.setattr(backend, "review", reviewer)
-    assert cli.check(state, Config(), "s", transcript, "Stop")["status"] == "finding"
-    assert state.session("s").attempts == 2
+    note = cli.check(state, Config(), "s", transcript, "Stop")["note"]
+    append(transcript, "message", role="assistant", content="I restored all old settings.")
+    assert cli.check(state, Config(), "s", transcript, "Stop")["status"] == "clear"
+    assert state.note(note["id"])["status"] == "new"
+    assert state.notes()[0]["id"] == note["id"]
+    assert calls == [cli.SCHEMA, cli.CONFIRMATION_SCHEMA, cli.SCHEMA]
+    assert cli.check(state, Config(), "s", transcript, "Stop")["status"] == "unchanged"
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize("bad_config", [False, True])
