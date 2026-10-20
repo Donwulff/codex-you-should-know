@@ -261,6 +261,10 @@ Checks retain the first three user messages and recent transcript activity withi
 
 ## Development
 
+See [review decisions and ideas](docs/review-decisions.md) for the confirmation
+policy, alternatives tried, and the deferred idea of updating existing notes
+during later reviews.
+
 Record user-visible changes under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). For a release, move those entries into a dated version section and use that section for the GitHub release notes.
 
 To update and install your own development version, close Codex chat windows and

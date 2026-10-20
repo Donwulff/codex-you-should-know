@@ -16,6 +16,7 @@ FILES = (
     "skills/you-should-know/SKILL.md",
     "README.md",
     "CHANGELOG.md",
+    "docs/review-decisions.md",
     "LICENSE",
 )
 MARKER = ".you-should-know-package"
