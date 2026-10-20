@@ -112,7 +112,9 @@ class State:
                 cached_input_tokens INTEGER NOT NULL,
                 output_tokens INTEGER NOT NULL,
                 model_called INTEGER NOT NULL DEFAULT 0,
-                usage_reported INTEGER NOT NULL DEFAULT 0
+                usage_reported INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                model_source TEXT
             );
             CREATE TABLE IF NOT EXISTS hook_events (
                 session_id TEXT NOT NULL,
@@ -168,6 +170,8 @@ class State:
                 ("candidates", "assistant_claim", "INTEGER NOT NULL DEFAULT 0"),
                 ("checks", "model_called", "INTEGER NOT NULL DEFAULT 0"),
                 ("checks", "usage_reported", "INTEGER NOT NULL DEFAULT 0"),
+                ("checks", "model", "TEXT"),
+                ("checks", "model_source", "TEXT"),
             ):
                 columns = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
                 if not any(column["name"] == name for column in columns):
@@ -345,6 +349,8 @@ class State:
         reason: str = "",
         phase: str = "review",
         model_called: bool = False,
+        model: str | None = None,
+        model_source: str | None = None,
     ) -> None:
         model_called = model_called or bool(usage)
         usage = usage or {}
@@ -353,7 +359,8 @@ class State:
             self.connection.execute(
                 "INSERT INTO checks(session_id, event, outcome, phase, reason, created_at, "
                 "latency, input_tokens, cached_input_tokens, output_tokens, "
-                "model_called, usage_reported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "model_called, usage_reported, model, model_source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     event,
@@ -367,6 +374,8 @@ class State:
                     usage.get("output_tokens", 0),
                     model_called,
                     usage_reported,
+                    model if model_called else None,
+                    model_source if model_called else None,
                 ),
             )
 
@@ -728,6 +737,19 @@ class State:
                 for row in self.connection.execute("SELECT * FROM checks ORDER BY id DESC LIMIT 20")
             ],
             **totals,
+            "model_usage": [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT model, model_source, count(*) AS model_calls, "
+                    "sum(outcome = 'error') AS errors, "
+                    "sum(input_tokens) AS input_tokens, "
+                    "sum(cached_input_tokens) AS cached_input_tokens, "
+                    "sum(output_tokens) AS output_tokens, "
+                    "sum(NOT usage_reported) AS usage_unknown_calls "
+                    "FROM checks WHERE model_called = 1 GROUP BY model, model_source "
+                    "ORDER BY model_calls DESC, model, model_source"
+                )
+            ],
             "hooks": hooks,
             "warnings": warnings,
             "mutes": [dict(row) for row in self.connection.execute("SELECT * FROM mutes")],

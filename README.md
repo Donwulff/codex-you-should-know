@@ -46,6 +46,8 @@ An empty check history is normal immediately after installation. After you finis
 
 Token totals include usage reported before a result failed validation. `usage_unknown_calls` counts calls whose usage was unavailable; those calls are not known to have used zero tokens. Legacy history predating these counters does not acquire invented usage or call counts.
 
+`recent_checks` includes the model ID requested for each model call and `model_source`: `config` for the plugin setting, `hook` for the active chat's model, or `argument` for a manual `--model` option. `model_usage` totals calls, errors, and tokens by model and source. Review and confirmation calls are recorded separately, so a model change between them remains visible. Older records and checks with no model call have a null model. If the reviewer CLI chooses its own model, the source is `cli_default` and the model stays null because that CLI does not report its choice.
+
 ## Update
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and upgrade notes.
@@ -204,7 +206,11 @@ retention_days = 30
 debug = false
 ```
 
-Add `model = "your-model-id"` to select a reviewer model. Otherwise, automatic checks use the hook's session model when available, then the Codex CLI default. Manual checks accept `--model`; without a configured or explicit model, they use the CLI default. Set `enabled = false` to disable the hooks globally. Add `max_checks_per_session = 30` only if you also want a lifetime limit; remove that setting from an older configuration to use the rolling limit alone.
+To keep the reviewer on a specific model, add a top-level setting such as `model = "gpt-6.1-sol"` to this plugin config file. This setting wins for automatic and manual checks, including over a manual `--model` argument. Without it, automatic checks use the model selected for the active chat, supplied by Codex in the hook's `model` field. Changing that chat with `/model` also changes its automatic reviewer model. Manual checks accept `--model gpt-6.1-sol` and do not read the model from the transcript.
+
+When neither the plugin config nor the invocation supplies a model, a separate Codex CLI process chooses one. The reviewer runs with `--ignore-user-config`, so that fallback skips `~/.codex/config.toml`; it does not inherit the model from another running chat. The plugin does not pin a fallback model ID. Both review calls request `low` reasoning effort independently of the main chat's effort.
+
+Set `enabled = false` to disable the hooks globally. Add `max_checks_per_session = 30` only if you also want a lifetime limit; remove that setting from an older configuration to use the rolling limit alone.
 
 Set `debug = true` or start Codex with `YSK_DEBUG=1` to show a one-line message for each check with its outcome, latency, and reported token usage. Configuration errors include the file path and appear once per session for each changed configuration file, rather than after every tool.
 

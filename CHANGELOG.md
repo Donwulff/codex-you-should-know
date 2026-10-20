@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Recorded the requested reviewer model and its selection source for each model call in `status`, with usage totals grouped by model and source. Review and confirmation calls retain their own model choices. Older records and unreported CLI defaults remain unknown rather than receiving inferred model names.
+
+### Changed
+
+- Explained model selection in terms of the active chat, the plugin's own model override, and the separate reviewer CLI's fallback with user configuration ignored.
+
 ## [0.3.0] - 2026-10-15
 
 ### Changed

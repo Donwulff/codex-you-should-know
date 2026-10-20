@@ -302,6 +302,59 @@ def test_telemetry_migration_preserves_legacy_totals_without_inventing_call_coun
     reopened.close()
 
 
+def test_model_telemetry_migrates_without_inventing_legacy_models(tmp_path):
+    state = State(tmp_path)
+    state.record_check("old", "Stop", "clear", 100, 1, model_called=True)
+    with state.connection:
+        state.connection.execute("ALTER TABLE checks DROP COLUMN model")
+        state.connection.execute("ALTER TABLE checks DROP COLUMN model_source")
+    state.close()
+
+    reopened = State(tmp_path)
+    report = reopened.diagnostics()
+    assert report["recent_checks"][0]["model"] is None
+    assert report["recent_checks"][0]["model_source"] is None
+    assert report["model_usage"][0]["model"] is None
+    assert report["model_usage"][0]["model_calls"] == 1
+    reopened.close()
+
+
+def test_model_usage_groups_calls_and_excludes_skipped_checks(tmp_path):
+    state = State(tmp_path)
+    for outcome, usage in (
+        ("clear", {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 5}),
+        ("error", {}),
+    ):
+        state.record_check(
+            "s",
+            "Stop",
+            outcome,
+            100,
+            1,
+            usage,
+            model_called=True,
+            model="gpt-6-astra",
+            model_source="hook",
+        )
+    state.record_check("s", "Stop", "skipped", 101, 0, model="gpt-6-astra", model_source="hook")
+    report = state.diagnostics()
+    assert report["model_usage"] == [
+        {
+            "model": "gpt-6-astra",
+            "model_source": "hook",
+            "model_calls": 2,
+            "errors": 1,
+            "input_tokens": 100,
+            "cached_input_tokens": 40,
+            "output_tokens": 5,
+            "usage_unknown_calls": 1,
+        }
+    ]
+    assert report["recent_checks"][0]["model"] is None
+    assert report["recent_checks"][0]["model_source"] is None
+    state.close()
+
+
 def test_hook_sightings_warn_only_about_events_not_observed(tmp_path, monkeypatch):
     monkeypatch.setattr("you_should_know.state.time.time", lambda: 123.0)
     state = State(tmp_path)

@@ -15,6 +15,7 @@ from you_should_know.state import State, review_lock
 
 @pytest.fixture(autouse=True)
 def interactive_host(monkeypatch):
+    monkeypatch.setattr(host.os, "getppid", lambda: 100)
     monkeypatch.setattr(host, "process_info", lambda pid: (1, "/bin/codex", ["codex"]))
 
 

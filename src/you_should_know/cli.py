@@ -64,6 +64,13 @@ def check(
     usage: dict[str, int] = {}
     model_called = False
     phase = "review"
+    selected_model = config.model or model
+    if config.model:
+        model_source = "config"
+    elif model:
+        model_source = "argument" if force else "hook"
+    else:
+        model_source = "cli_default"
 
     def outcome(status: str, reason: str = "", **details: Any) -> dict[str, Any]:
         latency = time.monotonic() - started
@@ -77,8 +84,18 @@ def check(
             reason,
             phase,
             model_called=model_called,
+            model=selected_model,
+            model_source=model_source,
         )
-        return {"status": status, "reason": reason, "latency": latency, "usage": usage, **details}
+        return {
+            "status": status,
+            "reason": reason,
+            "latency": latency,
+            "usage": usage,
+            "model": selected_model if model_called else None,
+            "model_source": model_source if model_called else None,
+            **details,
+        }
 
     def budget() -> bool:
         if force or state.budget_available(session_id, config, time.time()):
@@ -150,7 +167,7 @@ def check(
                 response = backend.review(
                     prompt,
                     SCHEMA,
-                    model=config.model or model,
+                    model=selected_model,
                     timeout=remaining / 2 if event == "Stop" else remaining,
                 )
                 usage = getattr(response, "usage", {})
@@ -211,7 +228,7 @@ def check(
             response = backend.review(
                 prompt,
                 CONFIRMATION_SCHEMA,
-                model=config.model or model,
+                model=selected_model,
                 timeout=max(1, deadline - time.monotonic()),
             )
             usage = getattr(response, "usage", {})
@@ -489,8 +506,13 @@ def debug_message(event: str, result: dict[str, Any]) -> str:
         else "tokens unknown"
     )
     reason = f" ({result['reason']})" if result.get("reason") else ""
+    model_info = ""
+    if result.get("model_source"):
+        model = re.sub(r"[\x00-\x1f\x7f]", " ", result.get("model") or "CLI default (unreported)")
+        model_info = f"; model={model} [{result['model_source']}]"
     return (
-        f"YSK debug: {event} {result['status']}{reason}; {result.get('latency', 0):.3f}s; {tokens}"
+        f"YSK debug: {event} {result['status']}{reason}; "
+        f"{result.get('latency', 0):.3f}s; {tokens}{model_info}"
     )
 
 
