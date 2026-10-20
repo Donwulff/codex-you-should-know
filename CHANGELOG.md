@@ -12,6 +12,10 @@
 - Added concise reminders after review and confirmation context, and clarified the observer's focus on practical consequences and explanations in plain language. Prompt changes have not been evaluated for model quality.
 - Explained model selection in terms of the active chat, the plugin's own model override, and the separate reviewer CLI's fallback with user configuration ignored.
 
+### Fixed
+
+- Review a changed, completed turn even when a recent background review is still on cooldown. Previously, a review could suppress ongoing work and then skip its finished result. Call budgets, unchanged-excerpt detection, and `final_check = false` still apply.
+
 ## [0.3.0] - 2026-10-15
 
 ### Changed

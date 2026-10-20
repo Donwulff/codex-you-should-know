@@ -44,9 +44,11 @@ def eligible(session: Session, config: Config, event: str, now: float, force: bo
         and session.attempts >= config.max_checks_per_session
     ):
         return False
+    if event == "Stop":
+        return True
     if session.attempts and now - session.last_attempt < config.min_interval_seconds:
         return False
-    return event == "Stop" or session.events - session.checked_events >= config.every_n_tools
+    return session.events - session.checked_events >= config.every_n_tools
 
 
 def check(

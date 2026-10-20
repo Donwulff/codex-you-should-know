@@ -77,6 +77,56 @@ def test_unchanged_transcript_does_not_spend_an_attempt(state, transcript, monke
     assert state.session("s").attempts == 1
 
 
+@pytest.mark.parametrize("background_finding", [False, True])
+def test_finished_turn_can_find_oversight_after_recent_background_review(
+    state, transcript, finding, monkeypatch, background_finding
+):
+    claim = "Your settings are preserved."
+    final_finding = replace(finding, evidence=[*finding.evidence, claim])
+    replies = iter(
+        [
+            response(finding, agent_still_working=True)
+            if background_finding
+            else {"finding": None},
+            response(final_finding, assistant_claim=True),
+            {
+                "confirmed": True,
+                "reason": "The loss is undisclosed.",
+                "evidence": final_finding.evidence,
+            },
+        ]
+    )
+    monkeypatch.setattr(backend, "review", lambda *a, **k: next(replies))
+    monkeypatch.setattr(cli.time, "time", lambda: 1000.0)
+    config = replace(Config(), every_n_tools=1)
+    before = cli.check(state, config, "s", transcript, "PostToolUse")
+    assert before["status"] == ("suppressed" if background_finding else "clear")
+    assert state.notes() == []
+    append(transcript, "message", role="assistant", content=claim)
+
+    # Same timestamp: the background cooldown is still in effect.
+    result = cli.check(state, config, "s", transcript, "Stop")
+    assert result["status"] == "finding"
+    assert result["note"]["evidence"] == final_finding.evidence
+    assert state.session("s").attempts == 3
+    assert cli.check(state, config, "s", transcript, "Stop")["status"] == "unchanged"
+    assert state.session("s").attempts == 3
+
+
+@pytest.mark.parametrize("limit", [{"max_checks_per_hour": 1}, {"max_checks_per_session": 1}])
+def test_finished_turn_respects_call_limits_during_background_cooldown(
+    state, transcript, monkeypatch, limit
+):
+    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(cli.time, "time", lambda: 1000.0)
+    config = replace(Config(), every_n_tools=1, **limit)
+    assert cli.check(state, config, "s", transcript, "PostToolUse")["status"] == "clear"
+    append(transcript, "message", role="assistant", content="Done.")
+    result = cli.check(state, config, "s", transcript, "Stop")
+    assert (result["status"], result["reason"]) == ("skipped", "budget exhausted")
+    assert state.session("s").attempts == 1
+
+
 @pytest.mark.parametrize(
     "configured,supplied,force,expected,source",
     [

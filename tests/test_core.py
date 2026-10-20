@@ -90,7 +90,8 @@ def test_cadence_cooldown_stop_and_limit(state):
     assert eligible(session, config, "PostToolUse", 1000, False)
     state.begin("session", 1000)
     session = state.observe("session", True)
-    assert not eligible(session, config, "Stop", 1119, False)
+    assert not eligible(session, config, "PostToolUse", 1119, False)
+    assert eligible(session, config, "Stop", 1001, False)
     assert eligible(session, config, "Stop", 1120, False)
     assert not eligible(session, replace(config, max_checks_per_session=1), "Stop", 2000, False)
     assert eligible(session, config, "Stop", 1001, True)
@@ -294,7 +295,9 @@ def test_stop_checks_conversation_without_tool_calls(state, transcript, monkeypa
     assert state.session("s").events == 0
 
 
-def test_stop_checks_later_assistant_message_after_cooldown(state, transcript, monkeypatch):
+def test_stop_checks_later_assistant_message_during_background_cooldown(
+    state, transcript, monkeypatch
+):
     calls = []
 
     def reviewer(*args, **kwargs):
@@ -302,7 +305,7 @@ def test_stop_checks_later_assistant_message_after_cooldown(state, transcript, m
         return {"finding": None}
 
     monkeypatch.setattr(backend, "review", reviewer)
-    config = replace(Config(), min_interval_seconds=0, every_n_tools=1)
+    config = replace(Config(), every_n_tools=1)
     assert check(state, config, "s", transcript, "PostToolUse")["status"] == "clear"
     with transcript.open("a") as file:
         file.write(
