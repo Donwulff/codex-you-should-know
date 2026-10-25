@@ -23,6 +23,7 @@ from .assessment import (
 )
 from .config import Config, ConfigError, data_directory, load_config
 from .host import noninteractive_host
+from .shortcuts import configure_shortcuts
 from .state import Session, State, review_lock
 from .transcript import (
     TranscriptError,
@@ -575,6 +576,11 @@ def parser() -> argparse.ArgumentParser:
     manual.add_argument("--transcript", type=Path, required=True)
     manual.add_argument("--session", required=True)
     manual.add_argument("--model")
+    shortcuts = commands.add_parser("shortcuts", help="Set up or remove optional Codex shortcuts")
+    shortcuts.add_argument("action", choices=("install", "remove"))
+    shortcuts.add_argument(
+        "--config", type=Path, help="Codex config.toml path (defaults to CODEX_HOME)"
+    )
     return result
 
 
@@ -606,6 +612,9 @@ def main(argv: list[str] | None = None) -> int:
     event = None
     directory = data_directory(args.data_dir)
     try:
+        if args.command == "shortcuts":
+            print(json.dumps(configure_shortcuts(args.action, args.config), indent=2))
+            return 0
         event = read_event() if is_hook else None
         if event and event["hook_event_name"] not in {"PostToolUse", "Stop", "UserPromptSubmit"}:
             print("{}")
