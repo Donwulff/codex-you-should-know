@@ -15,10 +15,11 @@ from . import backend
 from .assessment import (
     AssessmentError,
     Finding,
-    make_confirmation_prompt,
-    make_prompt,
+    evidence_diagnostics,
     parse_confirmation,
     parse_finding,
+    prepare_confirmation_prompt,
+    prepare_prompt,
 )
 from .config import Config, ConfigError, data_directory, load_config
 from .host import noninteractive_host
@@ -202,6 +203,8 @@ def check(
                 )
             return outcome("skipped", "cadence or cooldown")
         confirming = False
+        response: object = None
+        evidence_transcript = ""
         try:
             transcript, offset = read()
             digest = hashlib.sha256(transcript.encode()).hexdigest()
@@ -211,7 +214,7 @@ def check(
             if not candidate:
                 if not budget():
                     return outcome("skipped", "budget exhausted")
-                prompt = make_prompt(
+                prompt, evidence_transcript = prepare_prompt(
                     transcript,
                     state.previous(),
                     state.known_topics(),
@@ -230,14 +233,14 @@ def check(
                 )
                 usage = getattr(response, "usage", {})
                 suppressed: list[dict] = []
-                finding = parse_finding(response, transcript, suppressed=suppressed)
+                finding = parse_finding(response, evidence_transcript, suppressed=suppressed)
                 state.finish(session_id, time.time(), digest)
                 for item in suppressed:
                     state.candidate(
                         session_id,
                         item["finding"],
                         time.time(),
-                        transcript,
+                        evidence_transcript,
                         offset,
                         status="suppressed",
                         reason=item["reason"],
@@ -252,7 +255,7 @@ def check(
                     session_id,
                     finding,
                     time.time(),
-                    transcript,
+                    evidence_transcript,
                     offset,
                     status="suppressed" if duplicate else "pending",
                     reason="topic already recorded" if duplicate else "awaiting confirmation",
@@ -280,7 +283,9 @@ def check(
             finding = Finding(
                 **{key: candidate[key] for key in ("topic", "summary", "explanation", "evidence")}
             )
-            prompt = make_confirmation_prompt(finding, candidate["transcript"], subsequent)
+            prompt, evidence_transcript = prepare_confirmation_prompt(
+                finding, candidate["transcript"], subsequent
+            )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return hold(candidate, "check time limit reached")
@@ -296,7 +301,7 @@ def check(
             usage = getattr(response, "usage", {})
             confirmed, reason = parse_confirmation(
                 response,
-                candidate["transcript"] + "\n\n" + subsequent,
+                evidence_transcript,
                 assistant_claim=candidate["assistant_claim"],
             )
             if confirmed and read(confirmation_offset)[0]:
@@ -313,6 +318,10 @@ def check(
         except (backend.BackendError, AssessmentError, TranscriptError) as error:
             usage = getattr(error, "usage", usage)
             detail = str(error)[:500]
+            if isinstance(error, AssessmentError):
+                rejected = evidence_diagnostics(response, evidence_transcript, detail)
+                if rejected is not None:
+                    diagnostics["evidence_rejection"] = rejected
             if candidate and confirming:
                 state.resolve_candidate(
                     candidate["id"], "withdrawn", f"Confirmation failed: {detail}", time.time()
