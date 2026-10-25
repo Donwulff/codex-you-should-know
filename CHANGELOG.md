@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-25
+
 ### Added
 
 - Added the requested reviewer model and its selection source to `status`, with calls, errors, and token usage grouped by model and source. Review and confirmation calls retain their own model choices. Historical records and unreported CLI defaults retain unknown model IDs.
@@ -14,6 +16,8 @@
 ### For contributors
 
 - Restored the documented `YSK_TEST_NATIVE_CODEX=1` opt-in for native discovery testing, so ordinary test runs do not install test plugins.
+
+Exit Codex sessions using the plugin before updating, then start or resume Codex. Review and trust any hooks marked modified in `/hooks`. Existing notes and configuration are preserved.
 
 ## [0.3.0] - 2026-10-15
 
@@ -136,7 +140,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.4...v0.2.5
