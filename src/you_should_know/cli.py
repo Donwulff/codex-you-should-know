@@ -6,6 +6,7 @@ import re
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,6 @@ from .state import Session, State, review_lock
 from .transcript import (
     TranscriptError,
     last_assistant_message,
-    read_since,
     read_since_snapshot,
     read_snapshot,
 )
@@ -66,6 +66,10 @@ def check(
     usage: dict[str, int] = {}
     model_called = False
     phase = "review"
+    diagnostics: dict[str, Any] = {}
+    transcript_available: bool | None = None
+    full_read = False
+    unknown_types: dict[str, int] = {}
     selected_model = config.model or model
     if config.model:
         model_source = "config"
@@ -76,6 +80,12 @@ def check(
 
     def outcome(status: str, reason: str = "", **details: Any) -> dict[str, Any]:
         latency = time.monotonic() - started
+        if transcript_available is not None:
+            state.record_transcript_read(
+                session_id,
+                failed=not transcript_available,
+                unknown_types=unknown_types if full_read and transcript_available else None,
+            )
         state.record_check(
             session_id,
             event,
@@ -88,6 +98,7 @@ def check(
             model_called=model_called,
             model=selected_model,
             model_source=model_source,
+            diagnostics=diagnostics,
         )
         return {
             "status": status,
@@ -98,6 +109,46 @@ def check(
             "model_source": model_source if model_called else None,
             **details,
         }
+
+    def read(offset: int | None = None) -> tuple[str, int]:
+        nonlocal transcript_available, full_read
+        for attempt in range(2):
+            try:
+                if offset is None:
+                    unknown_types.clear()
+                    result = read_snapshot(
+                        transcript_path, config.max_context_chars, unknown_types=unknown_types
+                    )
+                    if not result[0].strip():
+                        raise TranscriptError("Conversation has no visible messages yet")
+                    full_read = True
+                    diagnostics["unknown_record_types"] = dict(unknown_types)
+                else:
+                    result = read_since_snapshot(transcript_path, offset, config.max_context_chars)
+                transcript_available = True
+                return result
+            except TranscriptError as error:
+                transcript_available = False
+                detail = dict(error.diagnostics)
+                if not detail:
+                    detail = {
+                        "path": str(transcript_path),
+                        "file_size": None,
+                        "mtime_ns": None,
+                        "line_number": None,
+                        "line_prefix": None,
+                    }
+                    try:
+                        stat = transcript_path.stat()
+                        detail.update(file_size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+                    except OSError:
+                        pass
+                detail["reason"] = str(error)
+                diagnostics.setdefault("transcript_errors", []).append(detail)
+                if attempt or time.monotonic() + 0.1 >= deadline:
+                    raise
+                time.sleep(0.1)
+        raise AssertionError("unreachable")
 
     def budget() -> bool:
         if force or state.budget_available(session_id, config, time.time()):
@@ -152,9 +203,7 @@ def check(
             return outcome("skipped", "cadence or cooldown")
         confirming = False
         try:
-            transcript, offset = read_snapshot(transcript_path, config.max_context_chars)
-            if not transcript.strip():
-                raise TranscriptError("Conversation has no visible messages yet")
+            transcript, offset = read()
             digest = hashlib.sha256(transcript.encode()).hexdigest()
             if not candidate and digest == session.last_hash and not force:
                 state.finish(session_id, time.time(), digest)
@@ -168,7 +217,9 @@ def check(
                     state.known_topics(),
                     review_instructions=config.review_instructions,
                 )
-                remaining = max(1, deadline - time.monotonic())
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return outcome("skipped", "check time limit reached")
                 state.begin(session_id, time.time())
                 model_called = True
                 response = backend.review(
@@ -217,18 +268,22 @@ def check(
                 started = time.monotonic()
                 usage = {}
                 model_called = False
+                diagnostics = {}
+                transcript_available = None
+                full_read = False
             phase = "confirmation"
             if time.monotonic() >= deadline:
                 return hold(candidate, "check time limit reached")
             if not budget():
                 return hold(candidate, "budget exhausted")
-            subsequent, confirmation_offset = read_since_snapshot(
-                transcript_path, candidate["offset"], config.max_context_chars
-            )
+            subsequent, confirmation_offset = read(candidate["offset"])
             finding = Finding(
                 **{key: candidate[key] for key in ("topic", "summary", "explanation", "evidence")}
             )
             prompt = make_confirmation_prompt(finding, candidate["transcript"], subsequent)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return hold(candidate, "check time limit reached")
             state.begin(session_id, time.time())
             model_called = True
             confirming = True
@@ -236,7 +291,7 @@ def check(
                 prompt,
                 CONFIRMATION_SCHEMA,
                 model=selected_model,
-                timeout=max(1, deadline - time.monotonic()),
+                timeout=remaining,
             )
             usage = getattr(response, "usage", {})
             confirmed, reason = parse_confirmation(
@@ -244,9 +299,7 @@ def check(
                 candidate["transcript"] + "\n\n" + subsequent,
                 assistant_claim=candidate["assistant_claim"],
             )
-            if confirmed and read_since(
-                transcript_path, confirmation_offset, config.max_context_chars
-            ):
+            if confirmed and read(confirmation_offset)[0]:
                 confirmed, reason = False, "Conversation advanced during confirmation"
             if confirmed:
                 identifier = state.publish_candidate(candidate["id"], time.time(), notify=not force)
@@ -267,7 +320,14 @@ def check(
             elif candidate:
                 state.resolve_candidate(candidate["id"], "pending", detail, time.time())
             state.finish(session_id, time.time(), "", detail)
-            result = outcome("error", detail, error=detail, notify=not session.last_error)
+            status = (
+                "transcript_unavailable"
+                if isinstance(error, TranscriptError) and not force
+                else "error"
+            )
+            result = outcome(
+                status, detail, error=detail, notify=status == "error" and not session.last_error
+            )
             if not force and result["notify"]:
                 state.queue_error(session_id, hook_result(result)["systemMessage"])
             return result
@@ -361,12 +421,16 @@ def notifications(
     return {"systemMessage": "\n\n".join(messages)} if messages else {}
 
 
-def assistant_waiting(path: str | None) -> bool:
+def assistant_waiting(
+    path: str | None, *, on_error: Callable[[TranscriptError], None] | None = None
+) -> bool:
     if not path:
         return True
     try:
         message = last_assistant_message(Path(path)).rstrip().rstrip("*_` ")
-    except TranscriptError:
+    except TranscriptError as error:
+        if on_error is not None:
+            on_error(error)
         return True
     if message.endswith("?"):
         return True
@@ -555,6 +619,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if state is None:
             state = State(directory)
+
+        def record_reply_error(error: TranscriptError) -> None:
+            assert state is not None and event is not None
+            state.record_check(
+                event["session_id"],
+                event["hook_event_name"],
+                "transcript_unavailable",
+                time.time(),
+                0,
+                reason=str(error),
+                phase="reply",
+                diagnostics={"transcript_errors": [{**error.diagnostics, "reason": str(error)}]},
+            )
+
         if event and args.command != "notify":
             state.hook_seen(event["session_id"], event["hook_event_name"], event.get("cwd", ""))
         if event and event["hook_event_name"] == "UserPromptSubmit":
@@ -563,7 +641,9 @@ def main(argv: list[str] | None = None) -> int:
                 event["session_id"],
                 event.get("prompt"),
                 event.get("turn_id"),
-                explicit_only=assistant_waiting(event.get("transcript_path")),
+                explicit_only=assistant_waiting(
+                    event.get("transcript_path"), on_error=record_reply_error
+                ),
                 timeout_seconds=config.reply_timeout_seconds,
                 cwd=event.get("cwd", ""),
             )
@@ -593,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
                     event["session_id"],
                     ready=True,
                     turn_id=event.get("turn_id"),
-                    explicit_only=assistant_waiting(path),
+                    explicit_only=assistant_waiting(path, on_error=record_reply_error),
                 )
                 if event["hook_event_name"] == "Stop"
                 else {}

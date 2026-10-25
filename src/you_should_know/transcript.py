@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 _MAX_LINE_BYTES = 1_048_576
 _TRUNCATED = "\n[... content truncated ...]\n"
@@ -27,6 +29,56 @@ _FRAME = re.compile(r"^\[([^\n\]]+); chars=(\d+)\]\n", re.MULTILINE)
 
 class TranscriptError(ValueError):
     """The supplied path is unreadable or is not a supported Codex rollout."""
+
+    def __init__(self, message: str, *, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
+def _location(path: Path) -> dict[str, Any]:
+    location: dict[str, Any] = {
+        "path": str(path),
+        "file_size": None,
+        "mtime_ns": None,
+        "line_number": None,
+        "line_prefix": None,
+    }
+    try:
+        stat = path.stat()
+        location.update(file_size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+    except OSError:
+        pass
+    return location
+
+
+@contextmanager
+def _stream(path: Path, location: dict[str, Any]) -> Generator[BinaryIO]:
+    try:
+        with path.open("rb") as stream:
+            stat = os.fstat(stream.fileno())
+            location.update(file_size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+            try:
+                yield stream
+            except TranscriptError as error:
+                remaining = location.get("byte_offset", 0)
+                if location["line_number"] is not None:
+                    stream.seek(0)
+                    line = 1
+                    while remaining:
+                        chunk = stream.read(min(remaining, _MAX_LINE_BYTES))
+                        if not chunk:
+                            break
+                        line += chunk.count(b"\n")
+                        remaining -= len(chunk)
+                    location["line_number"] = line
+                    error.args = (re.sub(r"(?<=line )\d+$", str(line), str(error)),)
+                error.diagnostics = location
+                raise
+    except OSError as error:
+        raise TranscriptError(
+            f"Cannot read transcript: {error.strerror or type(error).__name__}",
+            diagnostics=location,
+        ) from error
 
 
 def _clip(text: str, limit: int) -> str:
@@ -69,7 +121,7 @@ def _clip_block(block: str, limit: int) -> str:
 
 
 def _records(
-    stream: BinaryIO, *, complete_only: bool = False
+    stream: BinaryIO, *, complete_only: bool = False, location: dict[str, Any] | None = None
 ) -> Iterator[tuple[dict | None, str | None]]:
     line_number = 0
     while True:
@@ -78,6 +130,8 @@ def _records(
         if not raw:
             return
         line_number += 1
+        if location is not None:
+            location.update(line_number=line_number, line_prefix=repr(raw[:200]), byte_offset=start)
         if len(raw) > _MAX_LINE_BYTES:
             while raw and not raw.endswith(b"\n"):
                 raw = stream.readline(_MAX_LINE_BYTES + 1)
@@ -151,7 +205,12 @@ def _visible_item(payload: dict) -> tuple[str, bool] | None:
 
 
 def _read(
-    path: Path, max_chars: int, *, offset: int = 0, complete_only: bool = False
+    path: Path,
+    max_chars: int,
+    *,
+    offset: int = 0,
+    complete_only: bool = False,
+    unknown_types: dict[str, int] | None = None,
 ) -> tuple[str, int]:
     """Return visible text, retaining the first three user messages and recent work.
 
@@ -167,19 +226,24 @@ def _read(
     omitted = False
     recognized = offset > 0
     sequence = 0
+    location = _location(path)
+    unknown: dict[str, int] = {}
     try:
-        with path.open("rb") as stream:
+        with _stream(path, location) as stream:
             stream.seek(offset)
-            for row, marker in _records(stream, complete_only=complete_only):
+            for row, marker in _records(stream, complete_only=complete_only, location=location):
                 user = False
                 if row is None:
                     block = marker or ""
                 else:
                     kind = row.get("type")
-                    if not isinstance(kind, str) or kind not in _ROLLOUT_TYPES:
+                    if not isinstance(kind, str):
                         raise TranscriptError(
                             "Unsupported transcript format; expected a Codex JSONL rollout"
                         )
+                    if kind not in _ROLLOUT_TYPES:
+                        unknown[kind] = unknown.get(kind, 0) + 1
+                        continue
                     if not isinstance(row.get("payload"), dict):
                         raise TranscriptError("Transcript record is missing its payload object")
                     recognized = True
@@ -205,12 +269,17 @@ def _read(
                     total -= len(removed) + 2
                     omitted = True
             cursor = stream.tell()
+        if not recognized:
+            raise TranscriptError("Empty or unsupported transcript; expected a Codex JSONL rollout")
+    except TranscriptError as exc:
+        exc.diagnostics = location
+        raise
     except OSError as exc:
         raise TranscriptError(
-            f"Cannot read transcript: {exc.strerror or type(exc).__name__}"
+            f"Cannot read transcript: {exc.strerror or type(exc).__name__}", diagnostics=location
         ) from exc
-    if not recognized:
-        raise TranscriptError("Empty or unsupported transcript; expected a Codex JSONL rollout")
+    if unknown_types is not None:
+        unknown_types.update(unknown)
     if not omitted:
         return "\n\n".join(block for _, block in recent), cursor
     prefix = ""
@@ -238,9 +307,11 @@ def read_transcript(path: Path, max_chars: int = 60_000) -> str:
     return _read(path, max_chars)[0]
 
 
-def read_snapshot(path: Path, max_chars: int = 60_000) -> tuple[str, int]:
+def read_snapshot(
+    path: Path, max_chars: int = 60_000, *, unknown_types: dict[str, int] | None = None
+) -> tuple[str, int]:
     """Return visible complete JSONL records and the byte cursor after them."""
-    return _read(path, max_chars, complete_only=True)
+    return _read(path, max_chars, complete_only=True, unknown_types=unknown_types)
 
 
 def read_since(path: Path, offset: int, max_chars: int = 60_000) -> str:
@@ -260,9 +331,10 @@ def read_since_snapshot(path: Path, offset: int, max_chars: int = 60_000) -> tup
 
 def last_assistant_message(path: Path) -> str:
     latest = ""
+    location = _location(path)
     try:
-        with path.open("rb") as stream:
-            for row, _ in _records(stream, complete_only=True):
+        with _stream(path, location) as stream:
+            for row, _ in _records(stream, complete_only=True, location=location):
                 if row is None or row.get("type") != "response_item":
                     continue
                 payload = row.get("payload")
