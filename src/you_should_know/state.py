@@ -13,6 +13,8 @@ from typing import Any
 from .assessment import Finding, topic_key
 from .config import Config
 
+_TRANSCRIPT_FAILURE_THRESHOLD = 3
+
 
 @dataclass(frozen=True)
 class Session:
@@ -26,6 +28,8 @@ class Session:
     last_error: str
     touched_at: float = 0
     cwd: str = ""
+    consecutive_transcript_failures: int = 0
+    unknown_record_types: str = "{}"
 
 
 class State:
@@ -46,7 +50,9 @@ class State:
                 last_attempt REAL NOT NULL DEFAULT 0,
                 last_success REAL NOT NULL DEFAULT 0,
                 last_hash TEXT NOT NULL DEFAULT '',
-                last_error TEXT NOT NULL DEFAULT ''
+                last_error TEXT NOT NULL DEFAULT '',
+                consecutive_transcript_failures INTEGER NOT NULL DEFAULT 0,
+                unknown_record_types TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS notes (
                 id TEXT PRIMARY KEY,
@@ -114,7 +120,8 @@ class State:
                 model_called INTEGER NOT NULL DEFAULT 0,
                 usage_reported INTEGER NOT NULL DEFAULT 0,
                 model TEXT,
-                model_source TEXT
+                model_source TEXT,
+                diagnostics TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS hook_events (
                 session_id TEXT NOT NULL,
@@ -164,6 +171,8 @@ class State:
             for table, name, declaration in (
                 ("sessions", "touched_at", "REAL NOT NULL DEFAULT 0"),
                 ("sessions", "cwd", "TEXT NOT NULL DEFAULT ''"),
+                ("sessions", "consecutive_transcript_failures", "INTEGER NOT NULL DEFAULT 0"),
+                ("sessions", "unknown_record_types", "TEXT NOT NULL DEFAULT '{}'"),
                 ("notes", "touched_at", "REAL NOT NULL DEFAULT 0"),
                 ("interactions", "ready_at", "REAL NOT NULL DEFAULT 0"),
                 ("notifications", "created_at", "REAL NOT NULL DEFAULT 0"),
@@ -172,6 +181,7 @@ class State:
                 ("checks", "usage_reported", "INTEGER NOT NULL DEFAULT 0"),
                 ("checks", "model", "TEXT"),
                 ("checks", "model_source", "TEXT"),
+                ("checks", "diagnostics", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 columns = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
                 if not any(column["name"] == name for column in columns):
@@ -215,6 +225,27 @@ class State:
         if row is None:
             raise ValueError("Unknown session")
         return Session(**dict(row))
+
+    def record_transcript_read(
+        self,
+        session_id: str,
+        *,
+        unknown_types: dict[str, int] | None = None,
+        failed: bool = False,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE sessions SET consecutive_transcript_failures = CASE WHEN ? "
+                "THEN consecutive_transcript_failures + 1 ELSE 0 END, "
+                "unknown_record_types = coalesce(?, unknown_record_types), touched_at = ? "
+                "WHERE session_id = ?",
+                (
+                    failed,
+                    json.dumps(unknown_types) if unknown_types is not None and not failed else None,
+                    time.time(),
+                    session_id,
+                ),
+            )
 
     def begin(self, session_id: str, now: float) -> None:
         with self.connection:
@@ -351,6 +382,7 @@ class State:
         model_called: bool = False,
         model: str | None = None,
         model_source: str | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         model_called = model_called or bool(usage)
         usage = usage or {}
@@ -359,8 +391,8 @@ class State:
             self.connection.execute(
                 "INSERT INTO checks(session_id, event, outcome, phase, reason, created_at, "
                 "latency, input_tokens, cached_input_tokens, output_tokens, "
-                "model_called, usage_reported, model, model_source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "model_called, usage_reported, model, model_source, diagnostics) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     event,
@@ -376,6 +408,7 @@ class State:
                     usage_reported,
                     model if model_called else None,
                     model_source if model_called else None,
+                    json.dumps(diagnostics or {}),
                 ),
             )
 
@@ -669,13 +702,26 @@ class State:
 
     def status(self) -> list[dict[str, Any]]:
         return [
-            dict(row)
+            {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
             for row in self.connection.execute(
                 "SELECT * FROM sessions ORDER BY last_attempt DESC LIMIT 20"
             )
         ]
 
     def diagnostics(self) -> dict[str, Any]:
+        def recent_checks(condition: str = "") -> list[dict[str, Any]]:
+            return [
+                {
+                    **dict(row),
+                    "model_called": bool(row["model_called"]),
+                    "usage_reported": bool(row["usage_reported"]),
+                    "diagnostics": json.loads(row["diagnostics"]),
+                }
+                for row in self.connection.execute(
+                    f"SELECT * FROM checks {condition} ORDER BY id DESC LIMIT 20"
+                )
+            ]
+
         counts = {"pending": 0, "confirmed": 0, "suppressed": 0, "withdrawn": 0}
         counts.update(
             {
@@ -728,13 +774,22 @@ class State:
         return {
             "candidates": counts,
             "candidate_reasons": reasons,
-            "recent_checks": [
-                {
-                    **dict(row),
-                    "model_called": bool(row["model_called"]),
-                    "usage_reported": bool(row["usage_reported"]),
-                }
-                for row in self.connection.execute("SELECT * FROM checks ORDER BY id DESC LIMIT 20")
+            "recent_checks": recent_checks(),
+            "recent_transcript_errors": recent_checks(
+                "WHERE json_array_length(diagnostics, '$.transcript_errors') > 0"
+            ),
+            "recent_evidence_rejections": recent_checks(
+                "WHERE json_type(diagnostics, '$.evidence_rejection') = 'object' "
+                "AND json_extract(diagnostics, '$.evidence_rejection') != '{}'"
+            ),
+            "transcript_failure_threshold": _TRANSCRIPT_FAILURE_THRESHOLD,
+            "unreviewable_sessions": [
+                {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
+                for row in self.connection.execute(
+                    "SELECT * FROM sessions WHERE consecutive_transcript_failures >= ? "
+                    "ORDER BY consecutive_transcript_failures DESC, touched_at DESC, session_id",
+                    (_TRANSCRIPT_FAILURE_THRESHOLD,),
+                )
             ],
             **totals,
             "model_usage": [
