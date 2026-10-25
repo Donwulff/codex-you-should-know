@@ -4,6 +4,11 @@
   "description": "Independent advisory checks for overlooked issues in Codex conversations.",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/setup/SKILL.md"
+    }
+  },
   "interface": {
     "displayName": "You Should Know",
     "shortDescription": "Catch consequential oversights",

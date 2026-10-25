@@ -19,6 +19,8 @@ When hook context already includes the selected note, use that note directly. Do
 
 Use this skill for requests to revisit older notes, inspect status, run a manual check, or share a note with the main agent. Natural requests such as "show my You Should Know notes" are sufficient; do not require the user to type the installed skill name.
 
+For requests to install or remove keyboard shortcuts, follow the bundled [setup skill](../setup/SKILL.md). Shortcut setup is optional and writes to the user's Codex configuration. Installing the plugin does not enable keyboard shortcuts automatically.
+
 Resolve the plugin root as two directories above this skill directory. Run the plugin CLI with `python3 <plugin-root>/scripts/you_should_know.py`. Quote the resolved path. Do not assume the plugin root is the current working directory.
 
 Use the command that matches the request:

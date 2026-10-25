@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added optional shortcut setup through a bundled skill and `shortcuts install`. Press Alt+Y, release the keys, then 1–4 to submit `ysk 1` through `ysk 4` using Codex CLI presets. Existing note-menu stages and reply windows still apply.
+- Added `shortcuts remove` to delete only unchanged settings installed by the helper. Setup preserves existing configuration and comments, reports conflicts without writing, and leaves matching pre-existing settings unowned. Neither command accesses the notes database or calls the reviewer; hook definitions are unchanged.
 - Added `notes --cwd` and `status --cwd` to limit listings to one working directory, and included a compact list of pending candidates (status, reason, topic, summary, timestamps, directory) in `notes` so pending findings remain visible if their session is not resumed. `notes --all` includes confirmed, suppressed, and withdrawn candidate history.
 - Added `status --limit` and `status --skipped`. `recent_checks` now defaults to executed checks and includes linked candidate or note topic and summary when those were recorded. Cadence and cooldown skips are available with `--skipped`.
 - Added `scripts/dev_update.py` to merge tracked upstream changes, preserve local edits, run validation, build a versioned development bundle, and switch an existing GitHub or local installation to that bundle. Installation failures attempt restoration from a local backup; running standalone Codex CLI sessions prevent replacement of their hook files. Persistent app-server and code-mode-host services do not block updates.

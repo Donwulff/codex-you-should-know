@@ -170,6 +170,37 @@ After an alert appears and Codex finishes its turn:
 
 To share the note without adding a message, reply `ysk 4` alone. If you continue another task first or the reply window expires, wait for the reminder at turn end before replying. Check its summary: the numbered choices always target the latest displayed note.
 
+## Keyboard shortcuts
+
+You can enable optional shortcuts through the bundled setup skill. In Codex, ask:
+
+```text
+Set up You Should Know keyboard shortcuts
+```
+
+Restart Codex after setup. With Codex CLI **0.164.0**, press **Alt+Y**, release the keys, then press a digit. The digit submits the corresponding reply without Enter:
+
+| Keys | Reply | Action |
+| --- | --- | --- |
+| Alt+Y, then 1 | `ysk 1` | Read the explanation and evidence. |
+| Alt+Y, then 2 | `ysk 2` | Mark the note as already known. |
+| Alt+Y, then 3 | `ysk 3` | Dismiss the note. |
+| Alt+Y, then 4 | `ysk 4` | Chat in the main session after reading details. |
+
+Use the choices offered by the current note menu. The shortcuts retain the reply window and menu stages; unavailable actions can reach the main agent as ordinary messages. To include feedback, type `ysk 4 your message` instead.
+
+Setup adds the Alt+Y binding and preset slots 1–4 to `${CODEX_HOME:-~/.codex}/config.toml`. It preserves your other settings and comments. If a binding or preset conflicts, setup reports the affected keys and leaves the file unchanged. Settings that already match remain yours. An existing target must be a regular file, not a symlink. Malformed TOML and target tables written inline, such as `tui = { ... }`, may need manual adjustment before setup can add missing settings.
+
+To undo the helper's changes, ask:
+
+```text
+Remove You Should Know keyboard shortcuts
+```
+
+Removal deletes only unchanged settings marked by the helper. It preserves settings that predated setup and any marked settings you edited afterward. Restart Codex after removal. Setup and removal do not access your notes database or call the reviewer; they do not change the hook definitions.
+
+From a repository clone, you can also run `python3 scripts/you_should_know.py shortcuts install` or `python3 scripts/you_should_know.py shortcuts remove`. Add `--config /path/to/config.toml` to target another Codex configuration file.
+
 ## Command-line access
 
 For direct access to notes and settings without asking Codex, clone this repository:
