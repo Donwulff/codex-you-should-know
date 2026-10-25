@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional shortcut setup through a bundled skill and `shortcuts install`. Press Alt+Y, release the keys, then 1–4 to submit `ysk 1` through `ysk 4` using Codex CLI presets. Existing note-menu stages and reply windows still apply.
+- Added `shortcuts remove` to delete only unchanged settings installed by the helper. Setup preserves existing configuration and comments, reports conflicts without writing, and leaves matching pre-existing settings unowned. Neither command accesses the notes database or calls the reviewer; hook definitions are unchanged.
+
 ## [0.3.2] - 2026-10-25
 
 ### Fixed

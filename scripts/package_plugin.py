@@ -13,6 +13,7 @@ FILES = (
     "resources/finding.schema.json",
     "resources/confirmation.schema.json",
     "scripts/you_should_know.py",
+    "skills/setup/SKILL.md",
     "skills/you-should-know/SKILL.md",
     "README.md",
     "CHANGELOG.md",

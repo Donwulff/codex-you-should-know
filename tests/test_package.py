@@ -44,6 +44,17 @@ def rpc_request(process, identifier, method, params):
 
 
 class PackageTests(unittest.TestCase):
+    def test_bundle_includes_the_declared_shortcut_setup_skill(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = build_package(ROOT, Path(temporary) / "package")
+            native = json.loads((package / ".codex-plugin/plugin.json").read_text())
+            setup = native["extensions"]["com.openai"]["onboardingSkill"]
+            self.assertEqual(setup, "./skills/setup/SKILL.md")
+            self.assertEqual(
+                (package / setup).read_bytes(), (ROOT / "skills/setup/SKILL.md").read_bytes()
+            )
+            self.assertTrue((package / "scripts/you_should_know.py").is_file())
+
     def test_marketplace_resolves_to_native_plugin_components(self):
         native = read_json(".codex-plugin/plugin.json")
         marketplace = read_json(".agents/plugins/marketplace.json")
