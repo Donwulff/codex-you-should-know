@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Skip and count unknown rollout record types, including `retained_context`, instead of rejecting an otherwise valid Codex rollout. Files must still contain a recognized rollout type. Only visible `response_item` content enters the reviewer excerpt; compaction checkpoints and retained context are not added as duplicate evidence.
+- Retry failed transcript reads once after 100 ms when the check deadline permits. Persistent failures record `transcript_unavailable` for automatic checks, without spending a model call before review starts. Manual checks retain their error exit status. This is an availability mitigation; source inspection found append-based compaction in Codex v0.164.0, and the historical line-1 corruption cause remains unverified.
+- Validate review and confirmation quotes against exactly the conversation excerpts shown after prompt budgeting. Pending candidates retain that same excerpt. Previously, validation could accept text removed from the model's input.
+- Accept exact carriage-return/newline evidence copied from the supplied text. Preserve tabs, trailing spaces, and Unicode verbatim; no whitespace or Unicode normalization is applied, and paraphrases remain invalid.
+- Require each evidence quote to fit inside a single source block, excluding generated truncation markers and source headers. Keep exact tool-result evidence, assistant-claim evidence, and the separate confirmation pass required. Prompt instructions explicitly exclude labels, omission markers, previous-note summaries, and candidate JSON from evidence.
+- Prevent a reviewer request from starting after transcript reading or prompt preparation exhausts the check deadline.
+
+### Added
+
+- Persist transcript-error paths, file metadata, physical line numbers, byte offsets, and escaped prefixes of up to 200 bytes. Status exposes recent errors, including successful retries and reply-menu read failures.
+- Report skipped unknown record counts and consecutive review transcript failures per session. Status flags every session with at least three consecutive failures; successful reads reset the failure count.
+- Persist rejected evidence with escaped quote and nearest-match displays capped at 500 characters, similarity ratios, and differing spans. Status exposes recent rejections; diagnostics expire with existing check retention. Approximate matches never affect validation.
+
+The hook definitions are unchanged. No hook re-trust is required for these changes.
+
 ## [0.3.1] - 2026-10-25
 
 ### Added

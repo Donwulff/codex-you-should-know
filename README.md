@@ -48,6 +48,17 @@ Token totals include usage reported before a result failed validation. `usage_un
 
 `recent_checks` records the requested model ID and `model_source`: `config` for the plugin setting, `hook` for the active chat's model, or `argument` for a manual `--model` option. `model_usage` groups calls, errors, tokens, and calls with unknown usage by model and source. Review and confirmation calls are recorded separately. Older records and checks without a model call have null model metadata. When the reviewer CLI chooses its own model, the source is `cli_default` and the model ID remains null; do not infer that ID from your current chat or configuration.
 
+You can inspect transcript health in `status`:
+
+- Each session reports `unknown_record_types`, counting skipped record types in its latest successful full read, and `consecutive_transcript_failures`, counting failed review checks since its last successful read. Repeated reads do not accumulate unknown-type counts. Cadence and budget skips leave the failure count unchanged.
+- `unreviewable_sessions` lists every session with at least `transcript_failure_threshold` consecutive failures; the threshold is 3.
+- `recent_transcript_errors` contains the latest 20 checks with read errors, including recovered retries. Each error records the path, file size, modification time in nanoseconds, physical line number, byte offset when available, and an escaped representation of the failing line's first 200 bytes. Unavailable metadata is null. Reply-menu read failures appear with phase `reply`; they do not increment the review failure counter.
+- `recent_evidence_rejections` contains the latest 20 checks with rejected evidence. Diagnostics include the reason, escaped quotes, source labels, and an approximate nearest match with a similarity ratio and differing spans. Quote and match displays are capped at 500 characters; at most eight quotes and eight differences per quote are retained, with omitted counts. Approximate matches are diagnostic only and never make a quote valid.
+
+Each affected check also carries its own `diagnostics` object in `recent_checks`. Diagnostics expire with their check records under `retention_days`. Historical records have no reconstructed diagnostics.
+
+A failed transcript read gets one retry after 100 ms when the check deadline permits. If it still fails, automatic checks record `transcript_unavailable`. Reads before a reviewer request spend no model-call budget; a request already made before a later read failure remains counted. A pending candidate stays pending if confirmation could not start; a failed read after confirmation starts prevents publication and withdraws it. Manual checks still return an error and a nonzero exit status. This retry mitigates transient unavailability; the cause of the observed historical line-1 failures remains unknown. Codex v0.164.0 [appends rollout records](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/rollout/src/recorder.rs#L2077-L2080), and its [hook transcript path points to the current rollout](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/session/mod.rs#L5445-L5463).
+
 ## Update
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and upgrade notes.
@@ -232,9 +243,11 @@ python3 scripts/you_should_know.py --data-dir /path/to/ysk-data status
 
 ## Boundaries
 
-The reviewer and confirmation reviewer run separately with a read-only sandbox. Tool use invalidates either result. Both calls validate evidence quotes against the supplied transcript. Conversation text is sent as plain text so quotes, newlines, and backslashes retain their exact spelling. This does not promise that every Codex backend can hide every tool from the reviewer.
+The reviewer and confirmation reviewer run separately with a read-only sandbox. Tool use invalidates either result. Both calls validate evidence quotes against exactly the conversation excerpts shown after budgeting. Each quote must fit within one source block, excluding generated truncation markers and headers. Conversation text is sent as plain text; CRLF, tabs, trailing spaces, backslashes, and Unicode retain their exact spelling without normalization. Previous-note summaries and candidate descriptions cannot supply evidence. This does not promise that every Codex backend can hide every tool from the reviewer.
 
 Checks retain the first three user messages and recent transcript activity within a character budget. A second byte limit bounds the complete model input, dropping older note summaries first and shortening the conversation with a visible marker if necessary. A note can still miss earlier context or be mistaken. Failed or timed-out checks do not interrupt the main task. Use `status` to inspect check state and errors. Native buttons and a separate alert panel would require changes to Codex itself.
+
+Only visible `response_item` content enters the excerpt. Unknown rollout record types are skipped and counted, while arbitrary JSONL without a recognized Codex record type is rejected. `retained_context` and `compacted` checkpoints do not add duplicate answers or encrypted compaction content to the reviewer input.
 
 ## Troubleshooting
 
