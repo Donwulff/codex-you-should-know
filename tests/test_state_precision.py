@@ -302,6 +302,59 @@ def test_telemetry_migration_preserves_legacy_totals_without_inventing_call_coun
     reopened.close()
 
 
+def test_model_telemetry_migrates_without_inventing_legacy_models(tmp_path):
+    state = State(tmp_path)
+    state.record_check("old", "Stop", "clear", 100, 1, model_called=True)
+    with state.connection:
+        state.connection.execute("ALTER TABLE checks DROP COLUMN model")
+        state.connection.execute("ALTER TABLE checks DROP COLUMN model_source")
+    state.close()
+
+    reopened = State(tmp_path)
+    report = reopened.diagnostics()
+    assert report["recent_checks"][0]["model"] is None
+    assert report["recent_checks"][0]["model_source"] is None
+    assert report["model_usage"][0]["model"] is None
+    assert report["model_usage"][0]["model_calls"] == 1
+    reopened.close()
+
+
+def test_model_usage_groups_calls_and_excludes_skipped_checks(tmp_path):
+    state = State(tmp_path)
+    for outcome, usage in (
+        ("clear", {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 5}),
+        ("error", {}),
+    ):
+        state.record_check(
+            "s",
+            "Stop",
+            outcome,
+            100,
+            1,
+            usage,
+            model_called=True,
+            model="gpt-6-astra",
+            model_source="hook",
+        )
+    state.record_check("s", "Stop", "skipped", 101, 0, model="gpt-6-astra", model_source="hook")
+    report = state.diagnostics()
+    assert report["model_usage"] == [
+        {
+            "model": "gpt-6-astra",
+            "model_source": "hook",
+            "model_calls": 2,
+            "errors": 1,
+            "input_tokens": 100,
+            "cached_input_tokens": 40,
+            "output_tokens": 5,
+            "usage_unknown_calls": 1,
+        }
+    ]
+    assert report["recent_checks"][0]["model"] is None
+    assert report["recent_checks"][0]["model_source"] is None
+    state.close()
+
+
 def test_hook_sightings_warn_only_about_events_not_observed(tmp_path, monkeypatch):
     monkeypatch.setattr("you_should_know.state.time.time", lambda: 123.0)
     state = State(tmp_path)
@@ -494,6 +547,8 @@ def test_pruning_cannot_unlink_a_held_review_lock(tmp_path):
         "retention_days = 0",
         "reply_timeout_seconds = 0",
         "unknown = true",
+        "review_instructions = 3",
+        'review_instructions = "' + "x" * 8001 + '"',
     ],
 )
 def test_new_configuration_rejects_invalid_values_with_file_path(tmp_path, text):
@@ -511,6 +566,7 @@ def test_new_configuration_defaults_and_explicit_lifetime_budget(tmp_path):
     assert config.retention_days == 30
     assert config.reply_timeout_seconds == 600
     assert not config.debug
+    assert config.review_instructions == ""
     (tmp_path / "config.toml").write_text(
         "max_checks_per_session = 12\nmax_checks_per_hour = 3\nfinal_check = false\n"
         "debug = true\nretention_days = 7\nreply_timeout_seconds = 60\n"
@@ -522,3 +578,13 @@ def test_new_configuration_defaults_and_explicit_lifetime_budget(tmp_path):
     assert config.debug
     assert config.retention_days == 7
     assert config.reply_timeout_seconds == 60
+
+
+def test_config_accepts_additional_review_focus(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        'review_instructions = """\n'
+        'Check recurring costs.\nExplain the effect in plain language.\n"""\n'
+    )
+    assert load_config(tmp_path).review_instructions == (
+        "Check recurring costs.\nExplain the effect in plain language.\n"
+    )

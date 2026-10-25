@@ -18,6 +18,7 @@ class Config:
     timeout_seconds: int = 90
     max_context_chars: int = 60_000
     model: str | None = None
+    review_instructions: str = ""
     final_check: bool = True
     retention_days: int = 30
     reply_timeout_seconds: int = 600
@@ -60,4 +61,10 @@ def load_config(directory: Path) -> Config:
             raise ConfigError(f"{path}: {name} must be an integer between {minimum} and {maximum}")
     if "model" in data and (not isinstance(data["model"], str) or not data["model"].strip()):
         raise ConfigError(f"{path}: model must be a nonempty string")
+    if "review_instructions" in data and (
+        not isinstance(data["review_instructions"], str) or len(data["review_instructions"]) > 8000
+    ):
+        raise ConfigError(
+            f"{path}: review_instructions must be a string of at most 8000 characters"
+        )
     return Config(**data)

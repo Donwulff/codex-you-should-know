@@ -251,6 +251,25 @@ def test_confirmation_prompt_keeps_new_context_and_explicit_disclosure_check():
     assert "OLD" in prompt and "NEW" in prompt
 
 
+@pytest.mark.parametrize("focus", ["Check recurring usage costs.", "🧭" * 8000])
+def test_custom_review_focus_survives_context_clipping(focus):
+    transcript = frame("tool result: id=c", "BEGIN\n" + "漢" * 150_000 + "\nEND")
+    prompt = make_prompt(transcript, [], review_instructions=focus)
+    assert focus in prompt
+    assert len(prompt.encode()) <= MAX_PROMPT_BYTES
+    assert (
+        prompt.index(focus)
+        < prompt.index("Every finding must be demonstrated by a tool result")
+        < prompt.index("BEGIN CONVERSATION")
+    )
+
+
+@pytest.mark.parametrize("instructions", [None, 1, "x" * 8001], ids=["none", "number", "oversized"])
+def test_review_focus_rejects_invalid_or_oversized_instructions(instructions):
+    with pytest.raises(ValueError, match="review_instructions"):
+        make_prompt("conversation", [], review_instructions=instructions)
+
+
 def test_review_budget_clipping_retains_valid_sources_and_tool_evidence():
     transcript = (
         frame("user", "INITIAL REQUEST\n" + "漢" * 100_000)

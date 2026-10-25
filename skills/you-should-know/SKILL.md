@@ -37,6 +37,10 @@ Use the note identifier returned by the CLI. When explaining a note, distinguish
 
 Findings remain hidden candidates until a separate confirmation checks subsequent work and disclosure. `status` reports pending, suppressed, and withdrawn candidate counts and reasons, recent outcomes, reported token usage, errors, latency, and hook sightings. An unconfirmed candidate is not a verified note. The default budget is 30 model calls per session per rolling hour, including confirmations; an explicit legacy lifetime limit still applies. Inactive state expires after 30 days by default.
 
+`recent_checks` records the requested model ID and its source (`config`, `hook`, or `argument`) for model calls. `model_usage` groups calls, errors, tokens, and calls with unknown usage by model and source. A `cli_default` source with a null model means the reviewer CLI selected an unreported model. Null model metadata in older records is unknown. Do not infer those model IDs from the current chat or configuration. Review and confirmation can use different models if the chat's selection changes between checks. The plugin's configured model takes precedence over hook models and manual `--model` arguments.
+
+Completed-turn reviews bypass the background cooldown while retaining call budgets and unchanged-excerpt detection. Setting `final_check = false` still disables those reviews and confirmations. Optional `review_instructions` adds up to 8,000 characters of focus to initial reviews; evidence validation and separate confirmation still apply.
+
 Run `know` or `dismiss` when the user requests that disposition. Reading notes does not change their status. If the user asks for a manual check, use the requested transcript and session. Manual checks consume Codex model usage and can make two calls when a candidate needs confirmation. Do not guess a transcript path or scan unrelated sessions.
 
 The hooks display notifications separately from the main agent. Choosing `chat in main session` or reading a note through this skill shares that note with the agent. Do not inject unrelated notes into the conversation or automatically act on an alert.

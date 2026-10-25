@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the requested reviewer model and its selection source to `status`, with calls, errors, and token usage grouped by model and source. Review and confirmation calls retain their own model choices. Historical records and unreported CLI defaults retain unknown model IDs.
+- Added optional `review_instructions` of up to 8,000 characters to focus initial reviews. Evidence validation and separate confirmation still apply; the default review and confirmation prompts are unchanged.
+
+### Fixed
+
+- Allowed changed, completed turns to be reviewed during the background cooldown, including work previously suppressed as still in progress. Call budgets, unchanged-excerpt detection, and `final_check = false` still apply.
+
+### For contributors
+
+- Restored the documented `YSK_TEST_NATIVE_CODEX=1` opt-in for native discovery testing, so ordinary test runs do not install test plugins.
+
 ## [0.3.0] - 2026-10-15
 
 ### Changed

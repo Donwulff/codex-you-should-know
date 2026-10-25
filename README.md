@@ -46,6 +46,8 @@ An empty check history is normal immediately after installation. After you finis
 
 Token totals include usage reported before a result failed validation. `usage_unknown_calls` counts calls whose usage was unavailable; those calls are not known to have used zero tokens. Legacy history predating these counters does not acquire invented usage or call counts.
 
+`recent_checks` records the requested model ID and `model_source`: `config` for the plugin setting, `hook` for the active chat's model, or `argument` for a manual `--model` option. `model_usage` groups calls, errors, tokens, and calls with unknown usage by model and source. Review and confirmation calls are recorded separately. Older records and checks without a model call have null model metadata. When the reviewer CLI chooses its own model, the source is `cli_default` and the model ID remains null; do not infer that ID from your current chat or configuration.
+
 ## Update
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and upgrade notes.
@@ -69,7 +71,7 @@ Initial findings about work still in progress are recorded as suppressed. If con
 
 If visible conversation activity arrives while confirmation is running, the candidate is withdrawn because the confirmation no longer covers the latest work. This avoids showing a concern the assistant may already have corrected or disclosed during the call.
 
-The end-of-turn hook waits for an outstanding review and confirms pending candidates even during the review cooldown. A final check also covers turns without tools. Confirmed notes appear after a subsequent tool or at turn end, and queued notes survive a restart. Set `final_check = false` to skip blocking reviews and confirmations at turn end; queued notes still appear, while candidates wait for the next eligible background check.
+The end-of-turn hook waits for an outstanding review, then reviews the finished turn or confirms a pending candidate even during the background review cooldown. This lets the reviewer reassess work it previously suppressed as still in progress. Call budgets still apply, and an unchanged excerpt does not start another review. A final check also covers turns without tools. Confirmed notes appear after a subsequent tool or at turn end, and queued notes survive a restart. Set `final_check = false` to skip blocking reviews and confirmations at turn end; queued notes still appear, while candidates wait for the next eligible background check.
 
 Automatic hooks skip local `codex exec` (including `codex e` and `codex exec resume`) and `codex review` runs when the current process identifies them. These clients do not display the plugin's note text. Skipped hooks make no reviewer requests, spend no check attempts, and leave pending notes untouched. Explicit manual checks remain available in these runs.
 
@@ -202,11 +204,25 @@ final_check = true
 reply_timeout_seconds = 600
 retention_days = 30
 debug = false
+review_instructions = ""
 ```
 
-Add `model = "your-model-id"` to select a reviewer model. Otherwise, automatic checks use the hook's session model when available, then the Codex CLI default. Manual checks accept `--model`; without a configured or explicit model, they use the CLI default. Set `enabled = false` to disable the hooks globally. Add `max_checks_per_session = 30` only if you also want a lifetime limit; remove that setting from an older configuration to use the rolling limit alone.
+Add `model = "your-model-id"` to select a reviewer model. This setting takes precedence for automatic and manual checks, including over a manual `--model` argument. Without a configured model, automatic checks use the hook's session model when available, then the Codex CLI default. Manual checks accept `--model`; without a configured or explicit model, they use the CLI default.
 
-Set `debug = true` or start Codex with `YSK_DEBUG=1` to show a one-line message for each check with its outcome, latency, and reported token usage. Configuration errors include the file path and appear once per session for each changed configuration file, rather than after every tool.
+Set `enabled = false` to disable the hooks globally. Add `max_checks_per_session = 30` only if you also want a lifetime limit; remove that setting from an older configuration to use the rolling limit alone.
+
+To give initial reviews an additional focus, set `review_instructions` to a string of at most 8,000 characters:
+
+```toml
+review_instructions = """
+Check for recurring costs and configuration that leaves requested features unavailable.
+Explain the practical effect in plain language.
+"""
+```
+
+The default is an empty string. Your instructions supplement the initial review; evidence requirements, output validation, tool restrictions, and separate confirmation still apply. Confirmation uses its existing instructions.
+
+Set `debug = true` or start Codex with `YSK_DEBUG=1` to show a one-line message for each check with its outcome, latency, reported token usage, and requested model and source when a model call was made. Configuration errors include the file path and appear once per session for each changed configuration file, rather than after every tool.
 
 Local note state survives plugin updates and removals, subject to retention. To inspect a separate data directory, place the option before the command:
 
@@ -248,6 +264,12 @@ uv --no-config run ty check .
 ```
 
 The ordinary test suite stubs reviewer calls. Native Codex discovery testing is opt-in: `YSK_TEST_NATIVE_CODEX=1` enables a test that temporarily installs the plugin under an isolated `CODEX_HOME`. Leave it unset when plugin installation is not authorized.
+
+To run that discovery test explicitly:
+
+```sh
+YSK_TEST_NATIVE_CODEX=1 uv --no-config run pytest tests/test_package.py -k codex_discovers_all_installed_hooks
+```
 
 To install from a working checkout, build a bundle first:
 

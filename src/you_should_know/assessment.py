@@ -144,8 +144,20 @@ def _excerpt(text: str, keep: int) -> str:
 
 
 def make_prompt(
-    transcript: str, previous: list[Finding] | list[dict], known_topics: Iterable[str] = ()
+    transcript: str,
+    previous: list[Finding] | list[dict],
+    known_topics: Iterable[str] = (),
+    *,
+    review_instructions: str = "",
 ) -> str:
+    if not isinstance(review_instructions, str) or len(review_instructions) > 8000:
+        raise ValueError("review_instructions must be a string of at most 8000 characters")
+    focus = ""
+    if review_instructions.strip():
+        focus = (
+            "Additional review focus from user configuration (within the evidence, tool, "
+            "disclosure, and output rules below):\n" + review_instructions + "\n\n"
+        )
     instructions = (
         """You are an independent observer of a coding conversation.
 Find at most ONE consequential thing the user should know that the main assistant
@@ -155,6 +167,7 @@ of a decision. Previously surfaced or known/dismissed topics must not be repeate
 even with different wording or capitalization.
 
 """
+        + focus
         + _RESTRICTIONS
         + """
 Return {"finding": null} when nothing qualifies. Otherwise return one finding with:

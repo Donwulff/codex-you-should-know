@@ -77,6 +77,121 @@ def test_unchanged_transcript_does_not_spend_an_attempt(state, transcript, monke
     assert state.session("s").attempts == 1
 
 
+@pytest.mark.parametrize("background_finding", [False, True])
+def test_finished_turn_can_find_oversight_after_recent_background_review(
+    state, transcript, finding, monkeypatch, background_finding
+):
+    claim = "Your settings are preserved."
+    final_finding = replace(finding, evidence=[*finding.evidence, claim])
+    replies = iter(
+        [
+            response(finding, agent_still_working=True)
+            if background_finding
+            else {"finding": None},
+            response(final_finding, assistant_claim=True),
+            {
+                "confirmed": True,
+                "reason": "The loss is undisclosed.",
+                "evidence": final_finding.evidence,
+            },
+        ]
+    )
+    monkeypatch.setattr(backend, "review", lambda *a, **k: next(replies))
+    monkeypatch.setattr(cli.time, "time", lambda: 1000.0)
+    config = replace(Config(), every_n_tools=1)
+    before = cli.check(state, config, "s", transcript, "PostToolUse")
+    assert before["status"] == ("suppressed" if background_finding else "clear")
+    assert state.notes() == []
+    append(transcript, "message", role="assistant", content=claim)
+
+    # Same timestamp: the background cooldown is still in effect.
+    result = cli.check(state, config, "s", transcript, "Stop")
+    assert result["status"] == "finding"
+    assert result["note"]["evidence"] == final_finding.evidence
+    assert state.session("s").attempts == 3
+    assert cli.check(state, config, "s", transcript, "Stop")["status"] == "unchanged"
+    assert state.session("s").attempts == 3
+
+
+@pytest.mark.parametrize("limit", [{"max_checks_per_hour": 1}, {"max_checks_per_session": 1}])
+def test_finished_turn_respects_call_limits_during_background_cooldown(
+    state, transcript, monkeypatch, limit
+):
+    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(cli.time, "time", lambda: 1000.0)
+    config = replace(Config(), every_n_tools=1, **limit)
+    assert cli.check(state, config, "s", transcript, "PostToolUse")["status"] == "clear"
+    append(transcript, "message", role="assistant", content="Done.")
+    result = cli.check(state, config, "s", transcript, "Stop")
+    assert (result["status"], result["reason"]) == ("skipped", "budget exhausted")
+    assert state.session("s").attempts == 1
+
+
+@pytest.mark.parametrize(
+    "configured,supplied,force,expected,source",
+    [
+        (None, "gpt-6-astra", False, "gpt-6-astra", "hook"),
+        (None, "gpt-6-luna", True, "gpt-6-luna", "argument"),
+        ("gpt-6.1-sol", "gpt-6-astra", False, "gpt-6.1-sol", "config"),
+        ("gpt-6.1-sol", "gpt-6-astra", True, "gpt-6.1-sol", "config"),
+        (None, None, True, None, "cli_default"),
+    ],
+)
+def test_check_records_selected_model_and_source(
+    state, transcript, monkeypatch, configured, supplied, force, expected, source
+):
+    called = []
+
+    def reviewer(*args, **kwargs):
+        called.append(kwargs["model"])
+        return {"finding": None}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    result = cli.check(
+        state, replace(Config(), model=configured), "s", transcript, "Stop", supplied, force
+    )
+    assert called == [expected]
+    assert (result["model"], result["model_source"]) == (expected, source)
+    recorded = state.diagnostics()["recent_checks"][0]
+    assert (recorded["model"], recorded["model_source"]) == (expected, source)
+
+
+def test_confirmation_records_its_own_model_after_chat_model_changes(
+    state, transcript, finding, monkeypatch
+):
+    models = []
+
+    def reviewer(prompt, schema, **kwargs):
+        models.append(kwargs["model"])
+        if schema == cli.SCHEMA:
+            return response(finding)
+        return {"confirmed": True, "reason": "Still unresolved", "evidence": finding.evidence}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    config = replace(Config(), every_n_tools=1)
+    assert (
+        cli.check(state, config, "s", transcript, "PostToolUse", "gpt-6.1-sol")["status"]
+        == "pending"
+    )
+    assert cli.check(state, config, "s", transcript, "Stop", "gpt-6-astra")["status"] == "finding"
+    assert models == ["gpt-6.1-sol", "gpt-6-astra"]
+    phases = {item["phase"]: item["model"] for item in state.diagnostics()["recent_checks"]}
+    assert phases == {"review": "gpt-6.1-sol", "confirmation": "gpt-6-astra"}
+
+
+def test_configured_review_focus_reaches_reviewer(state, transcript, monkeypatch):
+    focus = "Pay particular attention to recurring usage costs."
+
+    def reviewer(prompt, schema, **kwargs):
+        assert focus in prompt
+        assert "Every finding must be demonstrated by a tool result" in prompt
+        return {"finding": None}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    config = replace(Config(), review_instructions=focus)
+    assert cli.check(state, config, "s", transcript, "Stop")["status"] == "clear"
+
+
 @pytest.mark.parametrize(
     "question",
     [

@@ -91,7 +91,10 @@ class PackageTests(unittest.TestCase):
                 build_package(ROOT, symlink)
             self.assertEqual(sentinel.read_text(), "Existing user data")
 
-    @unittest.skipUnless(shutil.which("codex"), "Codex CLI is required for native discovery")
+    @unittest.skipUnless(
+        os.environ.get("YSK_TEST_NATIVE_CODEX") == "1" and shutil.which("codex"),
+        "Set YSK_TEST_NATIVE_CODEX=1 to install a test plugin with the Codex CLI",
+    )
     def test_codex_discovers_all_installed_hooks(self):
         with tempfile.TemporaryDirectory(prefix="ysk native ") as temporary:
             temporary = Path(temporary)
