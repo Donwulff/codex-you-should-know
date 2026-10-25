@@ -172,12 +172,15 @@ class FakeCodex:
     def __init__(self, root, source):
         self.marketplace = {"name": updater.NAME, "root": str(root / "published marketplace")}
         shutil.copytree(source, self.marketplace["root"])
+        installed_version = json.loads(
+            (Path(self.marketplace["root"]) / ".codex-plugin/plugin.json").read_text()
+        )["version"]
         self.plugins = [
             {
                 "name": updater.NAME,
                 "pluginId": updater.PLUGIN,
                 "marketplaceName": updater.NAME,
-                "version": "0.3.0",
+                "version": installed_version,
                 "enabled": True,
             }
         ]
@@ -250,8 +253,11 @@ def test_failed_install_restores_previous_files_without_network(installation):
     fake.fail_next_add = True
     with pytest.raises(updater.UpdateError, match="restoration details"):
         updater.install(root, bundle)
-    assert fake.plugins[0]["version"] == "0.3.0"
     backup = Path(fake.marketplace["root"])
+    assert (
+        fake.plugins[0]["version"]
+        == json.loads((backup / ".codex-plugin/plugin.json").read_text())["version"]
+    )
     assert backup.is_dir()
     assert (backup.parent / "previous.json").exists()
     assert backup != bundle

@@ -338,3 +338,72 @@ def test_snapshot_does_not_skip_partial_oversized_records(tmp_path: Path) -> Non
     subsequent = read_since(path, cursor)
     assert "Oversized transcript record omitted" in subsequent
     assert list(source_blocks(subsequent)) == [("assistant", "Done")]
+
+
+def test_skips_unknown_rollout_types_and_counts_them(tmp_path: Path) -> None:
+    path = rollout(tmp_path, message("user", "Original request"))
+    with path.open("a") as stream:
+        for kind in ("retained_context", "future_record", "future_record"):
+            stream.write(json.dumps({"type": kind, "payload": "Not reviewer evidence"}) + "\n")
+        stream.write(
+            json.dumps({"type": "response_item", "payload": message("assistant", "Done")}) + "\n"
+        )
+    unknown = {}
+    assert "Original request" in read_transcript(path)
+    text, cursor = read_snapshot(path, unknown_types=unknown)
+    assert list(source_blocks(text)) == [("user", "Original request"), ("assistant", "Done")]
+    assert cursor == path.stat().st_size
+    assert unknown == {"retained_context": 1, "future_record": 2}
+    assert read_transcript(path) == text
+
+
+def test_unknown_types_alone_do_not_establish_a_rollout(tmp_path: Path) -> None:
+    path = tmp_path / "arbitrary.jsonl"
+    path.write_text('{"type":"future_record","payload":{}}\n')
+    with pytest.raises(TranscriptError, match="[Uu]nsupported"):
+        read_transcript(path)
+
+
+@pytest.mark.parametrize("bad_line", [b'{"type":\n', b"\x00" * 300 + b"\n", b"\xff\n"])
+def test_parse_errors_capture_file_and_failing_bytes(tmp_path: Path, bad_line: bytes) -> None:
+    path = rollout(tmp_path)
+    with path.open("ab") as stream:
+        stream.write(bad_line)
+    with pytest.raises(TranscriptError) as caught:
+        read_snapshot(path)
+    diagnostic = caught.value.diagnostics
+    assert diagnostic["path"] == str(path)
+    assert diagnostic["file_size"] == path.stat().st_size
+    assert diagnostic["mtime_ns"] == path.stat().st_mtime_ns
+    assert diagnostic["line_number"] == 2
+    assert diagnostic["line_prefix"] == repr(bad_line[:200])
+
+
+def test_invalid_visible_payload_has_line_diagnostics(tmp_path: Path) -> None:
+    path = rollout(tmp_path, {"type": "message", "role": "user"})
+    with pytest.raises(TranscriptError) as caught:
+        read_snapshot(path)
+    assert caught.value.diagnostics["line_number"] == 2
+    assert '"role": "user"' in caught.value.diagnostics["line_prefix"]
+
+
+def test_cursor_error_reports_physical_line_number(tmp_path: Path) -> None:
+    path = rollout(tmp_path, message("user", "Request"))
+    _, offset = read_snapshot(path)
+    with path.open("ab") as stream:
+        stream.write(b"\x00\n")
+    with pytest.raises(TranscriptError) as caught:
+        read_since(path, offset)
+    assert caught.value.diagnostics["line_number"] == 3
+    assert str(caught.value) == "Invalid JSONL at transcript line 3"
+
+
+def test_latest_assistant_reader_captures_parse_diagnostics(tmp_path: Path) -> None:
+    path = rollout(tmp_path, message("assistant", "Question?"))
+    with path.open("ab") as stream:
+        stream.write(b"\x00\n")
+    with pytest.raises(TranscriptError) as caught:
+        last_assistant_message(path)
+    assert caught.value.diagnostics["path"] == str(path)
+    assert caught.value.diagnostics["line_number"] == 3
+    assert caught.value.diagnostics["line_prefix"] == repr(b"\x00\n")

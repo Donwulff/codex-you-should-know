@@ -251,14 +251,24 @@ def test_confirmation_prompt_keeps_new_context_and_explicit_disclosure_check():
     assert "OLD" in prompt and "NEW" in prompt
 
 
-def test_custom_review_focus_and_final_reminder_survive_context_clipping():
+@pytest.mark.parametrize(
+    "focus",
+    [
+        "Pay particular attention to recurring usage costs.",
+        "Check recurring usage costs.",
+        "🧭" * 8000,
+    ],
+)
+def test_custom_review_focus_and_final_reminder_survive_context_clipping(focus):
     transcript = frame("tool result: id=c", "BEGIN\n" + "漢" * 150_000 + "\nEND")
-    focus = "Pay particular attention to recurring usage costs."
     prompt = make_prompt(transcript, [], review_instructions=focus)
     assert focus in prompt
     assert len(prompt.encode()) <= MAX_PROMPT_BYTES
-    assert "Every finding must be demonstrated by a tool result" in prompt
-    assert prompt.index(focus) < prompt.index("BEGIN CONVERSATION")
+    assert (
+        prompt.index(focus)
+        < prompt.index("Every finding must be demonstrated by a tool result")
+        < prompt.index("BEGIN CONVERSATION")
+    )
     reminder = prompt.rsplit("\nEND CONVERSATION\n", 1)[1]
     assert "Final check:" in reminder
     assert 'or {"finding": null}' in reminder

@@ -48,6 +48,17 @@ Token totals include usage reported before a result failed validation. `usage_un
 
 `recent_checks` defaults to the newest 20 checks that actually ran, including unchanged excerpts, clear results, findings, pending or withdrawn candidates, and errors. Cadence, cooldown, budget, disabled, and busy-reviewer skips are omitted. Each row includes token usage when a model was called. When the check created or resolved a candidate or note, the row also includes that item's topic and summary. Use `status --skipped` to include skipped attempts, `status --limit N` to change how many rows are returned, and `status --cwd PATH` to limit the report to one working directory. `model_source` is `config` for the plugin setting, `hook` for the active chat's model, or `argument` for a manual `--model` option. `model_usage` totals calls, errors, and tokens by model and source. Review and confirmation calls are recorded separately, so a model change between them remains visible. Older records and checks with no model call have a null model. If the reviewer CLI chooses its own model, the source is `cli_default` and the model stays null because that CLI does not report its choice.
 
+You can inspect transcript health in `status`:
+
+- Each session reports `unknown_record_types`, counting skipped record types in its latest successful full read, and `consecutive_transcript_failures`, counting failed review checks since its last successful read. Repeated reads do not accumulate unknown-type counts. Cadence and budget skips leave the failure count unchanged.
+- `unreviewable_sessions` lists every session with at least `transcript_failure_threshold` consecutive failures; the threshold is 3.
+- `recent_transcript_errors` contains the latest 20 checks with read errors, including recovered retries. Each error records the path, file size, modification time in nanoseconds, physical line number, byte offset when available, and an escaped representation of the failing line's first 200 bytes. Unavailable metadata is null. Reply-menu read failures appear with phase `reply`; they do not increment the review failure counter.
+- `recent_evidence_rejections` contains the latest 20 checks with rejected evidence. Diagnostics include the reason, escaped quotes, source labels, and an approximate nearest match with a similarity ratio and differing spans. Quote and match displays are capped at 500 characters; at most eight quotes and eight differences per quote are retained, with omitted counts. Approximate matches are diagnostic only and never make a quote valid.
+
+Each affected check also carries its own `diagnostics` object in `recent_checks`. Diagnostics expire with their check records under `retention_days`. Historical records have no reconstructed diagnostics. `status --cwd` limits these diagnostic lists to that working directory along with the rest of the report.
+
+A failed transcript read gets one retry after 100 ms when the check deadline permits. If it still fails, automatic checks record `transcript_unavailable`. Reads before a reviewer request spend no model-call budget; a request already made before a later read failure remains counted. A pending candidate stays pending if confirmation could not start; a failed read after confirmation starts prevents publication and withdraws it. Manual checks still return an error and a nonzero exit status. This retry mitigates transient unavailability; the cause of the observed historical line-1 failures remains unknown. Codex v0.164.0 [appends rollout records](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/rollout/src/recorder.rs#L2077-L2080), and its [hook transcript path points to the current rollout](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/session/mod.rs#L5445-L5463).
+
 ## Update
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and upgrade notes.
@@ -73,7 +84,7 @@ Confirmation reads the latest available conversation before its model call. If t
 
 Published notes are not automatically reassessed or marked resolved by later reviews. Later reviews receive summaries of recent notes, plus topics marked known or dismissed, to avoid repeating them. A published note remains open until you mark it known, dismiss it, or it expires under the retention policy. Automatically tracking whether existing notes have since been resolved would be a separate feature.
 
-The end-of-turn hook waits for an outstanding review, then reviews the finished turn or confirms a pending candidate even during the background review cooldown. This lets the reviewer reassess work it previously suppressed as still in progress. The call budgets still apply, and an unchanged excerpt does not start another review. A final check also covers turns without tools. Confirmed notes appear after a subsequent tool or at turn end, and queued notes survive a restart. Set `final_check = false` to skip blocking reviews and confirmations at turn end; queued notes still appear, while candidates wait for the next eligible background check.
+The end-of-turn hook waits for an outstanding review, then reviews the finished turn or confirms a pending candidate even during the background review cooldown. This lets the reviewer reassess work it previously suppressed as still in progress. Call budgets still apply, and an unchanged excerpt does not start another review. A final check also covers turns without tools. Confirmed notes appear after a subsequent tool or at turn end, and queued notes survive a restart. Set `final_check = false` to skip blocking reviews and confirmations at turn end; queued notes still appear, while candidates wait for the next eligible background check.
 
 Automatic hooks skip local `codex exec` (including `codex e` and `codex exec resume`) and `codex review` runs when the current process identifies them. These clients do not display the plugin's note text. Skipped hooks make no reviewer requests, spend no check attempts, and leave pending notes untouched. Explicit manual checks remain available in these runs.
 
@@ -219,20 +230,20 @@ When neither the plugin config nor the invocation supplies a model, a separate C
 
 Set `enabled = false` to disable the hooks globally. Add `max_checks_per_session = 30` only if you also want a lifetime limit; remove that setting from an older configuration to use the rolling limit alone.
 
-To give the observer an additional focus, set `review_instructions` (up to 8,000 characters):
+To give initial reviews an additional focus, set `review_instructions` to a string of at most 8,000 characters:
 
 ```toml
 review_instructions = """
-Additionally, look for recurring costs and configuration that leaves requested
-features unavailable. Explain the practical effect in plain language.
+Check for recurring costs and configuration that leaves requested features unavailable.
+Explain the practical effect in plain language.
 """
 ```
 
-This supplements the initial review prompt. It does not replace the evidence requirements, output schema, tool restrictions, or separate confirmation. The default prompt includes a short final reminder after the conversation; a longer prompt or repeated instructions is not a guarantee of better findings.
+The default is an empty string. Your instructions supplement the initial review; evidence requirements, output validation, tool restrictions, and separate confirmation still apply. Confirmation uses its existing instructions. The default prompts include a short final reminder after the conversation; a longer prompt or repeated instructions is not a guarantee of better findings.
 
 For comparisons, freeze a copy of the relevant rollout and use a fresh `--data-dir` for each model or prompt variant. Put each variant's `config.toml` there, use the same frozen transcript, session identifier, and context limit, then compare findings, false alarms, tokens, and latency. Separate state directories prevent known topics and earlier pending candidates from influencing the comparison. Include examples that should produce no note as well as a genuine oversight. Replays consume model usage; the ordinary test suite does not run them.
 
-Set `debug = true` or start Codex with `YSK_DEBUG=1` to show a one-line message for each check with its outcome, latency, and reported token usage. Configuration errors include the file path and appear once per session for each changed configuration file, rather than after every tool.
+Set `debug = true` or start Codex with `YSK_DEBUG=1` to show a one-line message for each check with its outcome, latency, reported token usage, and requested model and source when a model call was made. Configuration errors include the file path and appear once per session for each changed configuration file, rather than after every tool.
 
 Local note state survives plugin updates and removals, subject to retention. To inspect a separate data directory, place the option before the command:
 
@@ -242,9 +253,11 @@ python3 scripts/you_should_know.py --data-dir /path/to/ysk-data status
 
 ## Boundaries
 
-The reviewer and confirmation reviewer run separately with a read-only sandbox. Tool use invalidates either result. Both calls validate evidence quotes against the supplied transcript. Conversation text is sent as plain text so quotes, newlines, and backslashes retain their exact spelling. This does not promise that every Codex backend can hide every tool from the reviewer.
+The reviewer and confirmation reviewer run separately with a read-only sandbox. Tool use invalidates either result. Both calls validate evidence quotes against exactly the conversation excerpts shown after budgeting. Each quote must fit within one source block, excluding generated truncation markers and headers. Conversation text is sent as plain text; CRLF, tabs, trailing spaces, backslashes, and Unicode retain their exact spelling without normalization. Previous-note summaries and candidate descriptions cannot supply evidence. This does not promise that every Codex backend can hide every tool from the reviewer.
 
 Checks retain the first three user messages and recent transcript activity within a character budget. A second byte limit bounds the complete model input, dropping older note summaries first and shortening the conversation with a visible marker if necessary. A note can still miss earlier context or be mistaken. Failed or timed-out checks do not interrupt the main task. Use `status` to inspect check state and errors. Native buttons and a separate alert panel would require changes to Codex itself.
+
+Only visible `response_item` content enters the excerpt. Unknown rollout record types are skipped and counted, while arbitrary JSONL without a recognized Codex record type is rejected. `retained_context` and `compacted` checkpoints do not add duplicate answers or encrypted compaction content to the reviewer input.
 
 ## Troubleshooting
 
@@ -285,7 +298,7 @@ validation failure.
 
 It installs the locked development dependencies, runs tests, lint, formatting,
 type and whitespace checks, and builds a separate plugin bundle. The bundle gets
-a version such as `0.3.0-dev.gabc123…` based on its contents; published version files
+a version such as `0.3.2-dev.gabc123…` based on its contents; published version files
 in the checkout are not changed.
 
 After validation, it replaces the existing `you-should-know@you-should-know`
@@ -318,6 +331,10 @@ remain after the app closes. It cannot detect whether an app chat window is open
 The ordinary test suite stubs reviewer calls. Native Codex discovery testing is
 opt-in: `YSK_TEST_NATIVE_CODEX=1` enables a test that temporarily installs the plugin
 under an isolated `CODEX_HOME`. No test makes a reviewer model call.
+
+```sh
+YSK_TEST_NATIVE_CODEX=1 uv --no-config run pytest tests/test_package.py -k codex_discovers_all_installed_hooks
+```
 
 For a bundle alone, `python3 scripts/package_plugin.py` remains available. Bundles
 include runtime files, documentation, and the license, excluding development

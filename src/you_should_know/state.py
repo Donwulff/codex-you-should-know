@@ -13,6 +13,8 @@ from typing import Any
 from .assessment import Finding, topic_key
 from .config import Config
 
+_TRANSCRIPT_FAILURE_THRESHOLD = 3
+
 
 @dataclass(frozen=True)
 class Session:
@@ -26,6 +28,8 @@ class Session:
     last_error: str
     touched_at: float = 0
     cwd: str = ""
+    consecutive_transcript_failures: int = 0
+    unknown_record_types: str = "{}"
 
 
 class State:
@@ -46,7 +50,9 @@ class State:
                 last_attempt REAL NOT NULL DEFAULT 0,
                 last_success REAL NOT NULL DEFAULT 0,
                 last_hash TEXT NOT NULL DEFAULT '',
-                last_error TEXT NOT NULL DEFAULT ''
+                last_error TEXT NOT NULL DEFAULT '',
+                consecutive_transcript_failures INTEGER NOT NULL DEFAULT 0,
+                unknown_record_types TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS notes (
                 id TEXT PRIMARY KEY,
@@ -116,7 +122,8 @@ class State:
                 model TEXT,
                 model_source TEXT,
                 candidate_id INTEGER,
-                note_id TEXT
+                note_id TEXT,
+                diagnostics TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS hook_events (
                 session_id TEXT NOT NULL,
@@ -166,6 +173,8 @@ class State:
             for table, name, declaration in (
                 ("sessions", "touched_at", "REAL NOT NULL DEFAULT 0"),
                 ("sessions", "cwd", "TEXT NOT NULL DEFAULT ''"),
+                ("sessions", "consecutive_transcript_failures", "INTEGER NOT NULL DEFAULT 0"),
+                ("sessions", "unknown_record_types", "TEXT NOT NULL DEFAULT '{}'"),
                 ("notes", "touched_at", "REAL NOT NULL DEFAULT 0"),
                 ("interactions", "ready_at", "REAL NOT NULL DEFAULT 0"),
                 ("notifications", "created_at", "REAL NOT NULL DEFAULT 0"),
@@ -176,6 +185,7 @@ class State:
                 ("checks", "model_source", "TEXT"),
                 ("checks", "candidate_id", "INTEGER"),
                 ("checks", "note_id", "TEXT"),
+                ("checks", "diagnostics", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 columns = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
                 if not any(column["name"] == name for column in columns):
@@ -219,6 +229,27 @@ class State:
         if row is None:
             raise ValueError("Unknown session")
         return Session(**dict(row))
+
+    def record_transcript_read(
+        self,
+        session_id: str,
+        *,
+        unknown_types: dict[str, int] | None = None,
+        failed: bool = False,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE sessions SET consecutive_transcript_failures = CASE WHEN ? "
+                "THEN consecutive_transcript_failures + 1 ELSE 0 END, "
+                "unknown_record_types = coalesce(?, unknown_record_types), touched_at = ? "
+                "WHERE session_id = ?",
+                (
+                    failed,
+                    json.dumps(unknown_types) if unknown_types is not None and not failed else None,
+                    time.time(),
+                    session_id,
+                ),
+            )
 
     def begin(self, session_id: str, now: float) -> None:
         with self.connection:
@@ -357,6 +388,7 @@ class State:
         model_source: str | None = None,
         candidate_id: int | None = None,
         note_id: str | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         model_called = model_called or bool(usage)
         usage = usage or {}
@@ -365,8 +397,8 @@ class State:
             self.connection.execute(
                 "INSERT INTO checks(session_id, event, outcome, phase, reason, created_at, "
                 "latency, input_tokens, cached_input_tokens, output_tokens, "
-                "model_called, usage_reported, model, model_source, candidate_id, note_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "model_called, usage_reported, model, model_source, candidate_id, note_id, "
+                "diagnostics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     event,
@@ -384,6 +416,7 @@ class State:
                     model_source if model_called else None,
                     candidate_id,
                     note_id,
+                    json.dumps(diagnostics or {}),
                 ),
             )
 
@@ -707,6 +740,10 @@ class State:
             item["model_called"] = bool(item["model_called"])
             item["usage_reported"] = bool(item["usage_reported"])
             item["cwd"] = item.get("cwd") or ""
+            raw_diagnostics = item.get("diagnostics") or "{}"
+            item["diagnostics"] = (
+                json.loads(raw_diagnostics) if isinstance(raw_diagnostics, str) else raw_diagnostics
+            )
             checks.append(item)
         candidates = self._lookup("candidates", [item.get("candidate_id") for item in checks])
         notes = self._lookup("notes", [item.get("note_id") for item in checks])
@@ -803,10 +840,34 @@ class State:
             "cwd", self._cwd_paths(cwd) if cwd is not None else None
         )
         return [
-            dict(row)
+            {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
             for row in self.connection.execute(
                 f"SELECT * FROM sessions WHERE {where} ORDER BY last_attempt DESC LIMIT 20",
                 params,
+            )
+        ]
+
+    def _checks_matching(
+        self, session_ids: list[str] | None, extra: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        where, params = self._session_predicate("checks.session_id", session_ids)
+        rows = self.connection.execute(
+            "SELECT checks.*, sessions.cwd AS cwd FROM checks "
+            "LEFT JOIN sessions ON sessions.session_id = checks.session_id "
+            f"WHERE ({where}) AND ({extra}) ORDER BY checks.id DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        return self._hydrate_checks(rows)
+
+    def _unreviewable_sessions(self, session_ids: list[str] | None) -> list[dict[str, Any]]:
+        where, params = self._session_predicate("session_id", session_ids)
+        return [
+            {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
+            for row in self.connection.execute(
+                "SELECT * FROM sessions WHERE consecutive_transcript_failures >= ? "
+                f"AND ({where}) ORDER BY consecutive_transcript_failures DESC, "
+                "touched_at DESC, session_id",
+                (_TRANSCRIPT_FAILURE_THRESHOLD, *params),
             )
         ]
 
@@ -900,6 +961,17 @@ class State:
             "candidates": counts,
             "candidate_reasons": reasons,
             "recent_checks": self._hydrate_checks(recent_rows),
+            "recent_transcript_errors": self._checks_matching(
+                session_ids,
+                "json_array_length(diagnostics, '$.transcript_errors') > 0",
+            ),
+            "recent_evidence_rejections": self._checks_matching(
+                session_ids,
+                "json_type(diagnostics, '$.evidence_rejection') = 'object' "
+                "AND json_extract(diagnostics, '$.evidence_rejection') != '{}'",
+            ),
+            "transcript_failure_threshold": _TRANSCRIPT_FAILURE_THRESHOLD,
+            "unreviewable_sessions": self._unreviewable_sessions(session_ids),
             **totals,
             "model_usage": [
                 dict(row)

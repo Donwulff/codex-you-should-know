@@ -7,8 +7,6 @@
 - Added `notes --cwd` and `status --cwd` to limit listings to one working directory, and included a compact list of pending candidates (status, reason, topic, summary, timestamps, directory) in `notes` so pending findings remain visible if their session is not resumed. `notes --all` includes confirmed, suppressed, and withdrawn candidate history.
 - Added `status --limit` and `status --skipped`. `recent_checks` now defaults to executed checks and includes linked candidate or note topic and summary when those were recorded. Cadence and cooldown skips are available with `--skipped`.
 - Added `scripts/dev_update.py` to merge tracked upstream changes, preserve local edits, run validation, build a versioned development bundle, and switch an existing GitHub or local installation to that bundle. Installation failures attempt restoration from a local backup; running standalone Codex CLI sessions prevent replacement of their hook files. Persistent app-server and code-mode-host services do not block updates.
-- Recorded the requested reviewer model and its selection source for each model call in `status`, with usage totals grouped by model and source. Review and confirmation calls retain their own model choices. Older records and unreported CLI defaults remain unknown rather than receiving inferred model names.
-- Added optional `review_instructions` to focus initial reviews without replacing evidence validation or confirmation, and documented how to compare models and prompts using a frozen transcript and separate state directories.
 
 ### Changed
 
@@ -17,9 +15,43 @@
 
 ### Fixed
 
-- Accept a valid confirmation against the conversation supplied to the reviewer. New messages or tool activity during the model call no longer withdraw an approved candidate or trigger extra confirmations. A note can occasionally arrive after its cause has been resolved; published notes are not automatically reassessed by later reviews.
-- Made native discovery testing opt-in as documented, so ordinary development validation does not install test plugins.
-- Review a changed, completed turn even when a recent background review is still on cooldown. Previously, a review could suppress ongoing work and then skip its finished result. Call budgets, unchanged-excerpt detection, and `final_check = false` still apply.
+- Accept a valid confirmation against the conversation supplied to the reviewer. New messages or tool activity during the model call no longer withdraw an approved candidate or trigger extra confirmations. A failed transcript read after confirmation starts still prevents publication. A note can occasionally arrive after its cause has been resolved; published notes are not automatically reassessed by later reviews.
+
+## [0.3.2] - 2026-10-25
+
+### Fixed
+
+- Skipped and counted unknown rollout record types, including `retained_context`, instead of rejecting an otherwise valid Codex rollout. Files must still contain a recognized rollout type. Only visible `response_item` content enters the reviewer excerpt; compaction checkpoints and retained context are not added as duplicate evidence.
+- Added one retry for failed transcript reads after 100 ms when the check deadline permits. Persistent failures record `transcript_unavailable` for automatic checks, without spending a model call before review starts. Manual checks retain their error exit status. This is an availability mitigation; source inspection found append-based compaction in Codex v0.164.0, and the historical line-1 corruption cause remains unverified.
+- Validated review and confirmation quotes against exactly the conversation excerpts shown after prompt budgeting. Pending candidates retain that same excerpt. Previously, validation could accept text removed from the model's input.
+- Accepted exact carriage-return/newline evidence copied from the supplied text. Tabs, trailing spaces, and Unicode remain verbatim; no whitespace or Unicode normalization is applied, and paraphrases remain invalid.
+- Required each evidence quote to fit inside a single source block, excluding generated truncation markers and source headers. Exact tool-result evidence, assistant-claim evidence, and the separate confirmation pass remain required. Prompt instructions explicitly exclude labels, omission markers, previous-note summaries, and candidate JSON from evidence.
+- Prevented reviewer requests from starting after transcript reading or prompt preparation exhausts the check deadline.
+
+### Added
+
+- Added transcript-error paths, file metadata, physical line numbers, byte offsets, and escaped prefixes of up to 200 bytes to check records. Status exposes recent errors, including successful retries and reply-menu read failures.
+- Added skipped unknown record counts and consecutive review transcript failures per session. Status flags every session with at least three consecutive failures; successful reads reset the failure count.
+- Added rejected evidence with escaped quote and nearest-match displays capped at 500 characters, similarity ratios, and differing spans to check records. Status exposes recent rejections; diagnostics expire with existing check retention. Approximate matches never affect validation.
+
+The hook definitions are unchanged. No hook re-trust is required for these changes.
+
+## [0.3.1] - 2026-10-25
+
+### Added
+
+- Added the requested reviewer model and its selection source to `status`, with calls, errors, and token usage grouped by model and source. Review and confirmation calls retain their own model choices. Historical records and unreported CLI defaults retain unknown model IDs.
+- Added optional `review_instructions` of up to 8,000 characters to focus initial reviews. Evidence validation and separate confirmation still apply; the default review and confirmation prompts are unchanged.
+
+### Fixed
+
+- Allowed changed, completed turns to be reviewed during the background cooldown, including work previously suppressed as still in progress. Call budgets, unchanged-excerpt detection, and `final_check = false` still apply.
+
+### For contributors
+
+- Restored the documented `YSK_TEST_NATIVE_CODEX=1` opt-in for native discovery testing, so ordinary test runs do not install test plugins.
+
+Exit Codex sessions using the plugin before updating, then start or resume Codex. Review and trust any hooks marked modified in `/hooks`. Existing notes and configuration are preserved.
 
 ## [0.3.0] - 2026-10-15
 
@@ -142,7 +174,9 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.4...v0.2.5
