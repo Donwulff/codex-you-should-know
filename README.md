@@ -42,7 +42,11 @@ To inspect review status, ask Codex:
 You Should Know status
 ```
 
-An empty check history is normal immediately after installation. After you finish a turn, `status` shows recent check outcomes, candidate counts and reasons, error counts, latency, and reported token usage. It also shows when each hook last ran and warns when a hook has never run while others have. A missing hook may be untrusted or may not have had an opportunity to run yet. A completed review can return no finding.
+An empty check history is normal immediately after installation. After you finish a turn, `status` shows recent check outcomes, candidate counts and reasons, error counts, latency, and reported token usage. Skipped checks, such as cadence, cooldown, and budget skips, are hidden from `recent_checks` unless you pass `--skipped`. Checks that read an unchanged excerpt remain visible. Totals still include skipped checks. Status also shows when each hook last ran and warns when a hook has never run while others have. A missing hook may be untrusted or may not have had an opportunity to run yet. A completed review can return no finding.
+
+Use `status --cwd PATH` to inspect one recorded working directory and `status --limit N` to change the default of 20 rows in each recent-check list. The directory filter applies to sessions, candidate counts and reasons, checks, totals, model usage, transcript errors, hook sightings, warnings, and mutes. Settings remain global. Directory matching uses the session's latest recorded working directory, resolves relative paths and symlinks, and excludes records whose session directory is unknown. It does not include subdirectories automatically.
+
+Checks that create or resolve a candidate include its ID, topic, summary, and current status and reason. Checks that publish a note also include a compact note summary. These linked objects reflect their current retained state; the check's own outcome and reason retain the historical result. Older checks have null links, and an expired candidate or note has a null summary. The command does not infer links from matching topics.
 
 Token totals include usage reported before a result failed validation. `usage_unknown_calls` counts calls whose usage was unavailable; those calls are not known to have used zero tokens. Legacy history predating these counters does not acquire invented usage or call counts.
 
@@ -55,7 +59,7 @@ You can inspect transcript health in `status`:
 - `recent_transcript_errors` contains the latest 20 checks with read errors, including recovered retries. Each error records the path, file size, modification time in nanoseconds, physical line number, byte offset when available, and an escaped representation of the failing line's first 200 bytes. Unavailable metadata is null. Reply-menu read failures appear with phase `reply`; they do not increment the review failure counter.
 - `recent_evidence_rejections` contains the latest 20 checks with rejected evidence. Diagnostics include the reason, escaped quotes, source labels, and an approximate nearest match with a similarity ratio and differing spans. Quote and match displays are capped at 500 characters; at most eight quotes and eight differences per quote are retained, with omitted counts. Approximate matches are diagnostic only and never make a quote valid.
 
-Each affected check also carries its own `diagnostics` object in `recent_checks`. Diagnostics expire with their check records under `retention_days`. Historical records have no reconstructed diagnostics.
+Each affected check also carries its own `diagnostics` object in `recent_checks`. `--limit` applies separately to `recent_checks`, `recent_transcript_errors`, and `recent_evidence_rejections`; it does not limit totals or candidate counts. Diagnostics expire with their check records under `retention_days`. Historical records have no reconstructed diagnostics.
 
 A failed transcript read gets one retry after 100 ms when the check deadline permits. If it still fails, automatic checks record `transcript_unavailable`. Reads before a reviewer request spend no model-call budget; a request already made before a later read failure remains counted. A pending candidate stays pending if confirmation could not start; a failed read after confirmation starts prevents publication and withdraws it. Manual checks still return an error and a nonzero exit status. This retry mitigates transient unavailability; the cause of the observed historical line-1 failures remains unknown. Codex v0.164.0 [appends rollout records](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/rollout/src/recorder.rs#L2077-L2080), and its [hook transcript path points to the current rollout](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/session/mod.rs#L5445-L5463).
 
@@ -213,19 +217,23 @@ The CLI uses the same data directory as the installed plugin:
 ```sh
 python3 scripts/you_should_know.py notes
 python3 scripts/you_should_know.py notes --all
+python3 scripts/you_should_know.py notes --cwd /path/to/project
 python3 scripts/you_should_know.py show 8f31a7c62b40
 python3 scripts/you_should_know.py know 8f31a7c62b40
 python3 scripts/you_should_know.py dismiss 8f31a7c62b40
 python3 scripts/you_should_know.py status
+python3 scripts/you_should_know.py status --cwd /path/to/project --limit 50 --skipped
 ```
 
-The identifier `8f31a7c62b40` is illustrative; replace it with an identifier from `notes`. The list contains up to 100 recent open notes, or 100 notes of any status with `--all`. Reading a note leaves its status unchanged.
+The identifier `8f31a7c62b40` is illustrative; replace it with a published note's identifier from `notes`. The JSON `notes` list contains up to 100 recent open notes, or 100 notes of any status with `--all`. A separate `candidates` list shows pending findings, including their topic, summary, status, reason, timestamps, and recorded directory. `--all` also includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit the stored transcript, evidence, and full explanation. A pending candidate is unconfirmed; its numeric ID is not a note ID and cannot be used with `show`, `know`, or `dismiss`. Both lists honor `--cwd PATH`. Reading these lists does not call the reviewer or change a finding's status.
 
 To request a check immediately, supply a Codex rollout transcript and session identifier. Manual checks work inside noninteractive sessions and bypass the tool cadence, cooldown, and model-call limits. They still require confirmation before returning a note and can make two model calls:
 
 ```sh
 python3 scripts/you_should_know.py check --transcript /path/to/rollout.jsonl --session my-check
 ```
+
+Manual checks record the invoking working directory for the supplied session, so you can find their results with `status --cwd PATH`.
 
 Identical topic labels, ignoring whitespace and case, are suppressed across sessions and projects sharing the data directory. Path punctuation remains significant. The reviewer sees summaries and statuses of up to 40 recent notes, plus a separate list of known and dismissed topic labels within the prompt byte budget. Older known topics can remain in that list after their summaries leave recent history.
 
@@ -291,7 +299,7 @@ Only visible `response_item` content enters the excerpt. Unknown rollout record 
 | A note reply reaches the main agent | Check `status` for a missing `UserPromptSubmit` hook. Trust the reply hook, wait for the end-of-turn menu, and use `ysk N` within the reply window. Bare answers pass through when Codex may be waiting for your answer. |
 | A hook is marked **modified** after an update | Review and trust the new definition through `/hooks`. |
 | A check reports an authentication failure | Run `codex login`, then try another check. |
-| No notes appear after a successful check | Inspect candidate counts and reasons in `status`. A concern may await confirmation, be suppressed as ongoing work or a duplicate, or have been withdrawn after confirmation. A clear check found nothing to report. |
+| No notes appear after a successful check | Inspect pending candidates with `notes`, or include suppressed and withdrawn history with `notes --all`. Use `status` for check outcomes and aggregate reasons. A clear check found nothing to report. |
 
 ## Development
 

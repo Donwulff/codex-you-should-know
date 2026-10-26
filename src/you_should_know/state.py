@@ -16,6 +16,22 @@ from .config import Config
 _TRANSCRIPT_FAILURE_THRESHOLD = 3
 
 
+def _canonical_cwd(cwd: str) -> str:
+    if not cwd:
+        return ""
+    try:
+        return str(Path(cwd).expanduser().resolve())
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"Cannot resolve working directory: {cwd}") from error
+
+
+def _stored_cwd(cwd: str | None) -> str:
+    try:
+        return _canonical_cwd(cwd or "")
+    except ValueError:
+        return ""
+
+
 @dataclass(frozen=True)
 class Session:
     session_id: str
@@ -42,6 +58,7 @@ class State:
         os.close(descriptor)
         self.connection = sqlite3.connect(path, timeout=5)
         self.connection.row_factory = sqlite3.Row
+        self.connection.create_function("canonical_cwd", 1, _stored_cwd)
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
@@ -188,6 +205,8 @@ class State:
                 ("checks", "model", "TEXT"),
                 ("checks", "model_source", "TEXT"),
                 ("checks", "diagnostics", "TEXT NOT NULL DEFAULT '{}'"),
+                ("checks", "candidate_id", "INTEGER"),
+                ("checks", "note_id", "TEXT"),
             ):
                 columns = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
                 if not any(column["name"] == name for column in columns):
@@ -211,12 +230,13 @@ class State:
     def close(self) -> None:
         self.connection.close()
 
-    def observe(self, session_id: str, is_tool: bool) -> Session:
+    def observe(self, session_id: str, is_tool: bool, cwd: str = "") -> Session:
         with self.connection:
             self.connection.execute(
-                "INSERT INTO sessions(session_id, touched_at) VALUES (?, ?) "
-                "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at",
-                (session_id, time.time()),
+                "INSERT INTO sessions(session_id, touched_at, cwd) VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at, "
+                "cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END",
+                (session_id, time.time(), _canonical_cwd(cwd)),
             )
             if is_tool:
                 self.connection.execute(
@@ -405,6 +425,8 @@ class State:
         model: str | None = None,
         model_source: str | None = None,
         diagnostics: dict[str, Any] | None = None,
+        candidate_id: int | None = None,
+        note_id: str | None = None,
     ) -> None:
         model_called = model_called or bool(usage)
         usage = usage or {}
@@ -413,8 +435,9 @@ class State:
             self.connection.execute(
                 "INSERT INTO checks(session_id, event, outcome, phase, reason, created_at, "
                 "latency, input_tokens, cached_input_tokens, output_tokens, "
-                "model_called, usage_reported, model, model_source, diagnostics) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "model_called, usage_reported, model, model_source, diagnostics, "
+                "candidate_id, note_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     event,
@@ -431,6 +454,8 @@ class State:
                     model if model_called else None,
                     model_source if model_called else None,
                     json.dumps(diagnostics or {}),
+                    candidate_id,
+                    note_id,
                 ),
             )
 
@@ -441,7 +466,7 @@ class State:
                 "INSERT INTO sessions(session_id, touched_at, cwd) VALUES (?, ?, ?) "
                 "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at, "
                 "cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END",
-                (session_id, now, cwd),
+                (session_id, now, _canonical_cwd(cwd)),
             )
             self.connection.execute(
                 "INSERT INTO hook_events(session_id, event, seen_at) VALUES (?, ?, ?) "
@@ -688,12 +713,77 @@ class State:
                 )
             return result
 
-    def notes(self, all_notes: bool = False) -> list[dict[str, Any]]:
-        condition = "" if all_notes else "WHERE status = 'new'"
+    @staticmethod
+    def _cwd_filter(cwd: str | None) -> tuple[str, tuple[str, ...]]:
+        if cwd is None:
+            return "1", ()
+        return (
+            "session_id IN (SELECT session_id FROM sessions "
+            "WHERE canonical_cwd(cwd) = ? AND cwd != '')",
+            (_canonical_cwd(cwd or "."),),
+        )
+
+    def notes(self, all_notes: bool = False, cwd: str | None = None) -> list[dict[str, Any]]:
+        scope, params = self._cwd_filter(cwd)
+        condition = "" if all_notes else "AND notes.status = 'new'"
         rows = self.connection.execute(
-            f"SELECT * FROM notes {condition} ORDER BY created_at DESC LIMIT 100"
+            "SELECT notes.*, sessions.cwd FROM notes LEFT JOIN sessions USING (session_id) "
+            f"WHERE {scope} {condition} ORDER BY notes.created_at DESC, notes.id DESC LIMIT 100",
+            params,
         ).fetchall()
-        return [self._decode(row) for row in rows]
+        return [{**self._decode(row), "cwd": _stored_cwd(row["cwd"])} for row in rows]
+
+    def candidates(
+        self, cwd: str | None = None, *, all_candidates: bool = False
+    ) -> list[dict[str, Any]]:
+        scope, params = self._cwd_filter(cwd)
+        condition = "" if all_candidates else "AND candidates.status = 'pending'"
+        rows = self.connection.execute(
+            "SELECT candidates.id, candidates.session_id, candidates.status, candidates.reason, "
+            "candidates.topic, candidates.summary, candidates.created_at, candidates.touched_at, "
+            "sessions.cwd FROM candidates LEFT JOIN sessions USING (session_id) "
+            f"WHERE {scope} {condition} ORDER BY candidates.created_at DESC, candidates.id DESC",
+            params,
+        )
+        return [{**dict(row), "cwd": _stored_cwd(row["cwd"])} for row in rows]
+
+    def _hydrate_checks(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        checks = [
+            {
+                **dict(row),
+                "cwd": _stored_cwd(row["cwd"]),
+                "model_called": bool(row["model_called"]),
+                "usage_reported": bool(row["usage_reported"]),
+                "diagnostics": json.loads(row["diagnostics"]),
+                "candidate": None,
+                "note": None,
+            }
+            for row in rows
+        ]
+        for table, field, extra in (
+            ("candidates", "candidate", ", reason"),
+            ("notes", "note", ""),
+        ):
+            identifiers = list(dict.fromkeys(item[f"{field}_id"] for item in checks))
+            identifiers = [identifier for identifier in identifiers if identifier is not None]
+            if not identifiers:
+                continue
+            placeholders = ",".join("?" for _ in identifiers)
+            related = {
+                row["id"]: dict(row)
+                for row in self.connection.execute(
+                    f"SELECT id, session_id, status, topic, summary{extra} FROM {table} "
+                    f"WHERE id IN ({placeholders})",
+                    identifiers,
+                )
+            }
+            for item in checks:
+                record = related.get(item[f"{field}_id"])
+                if record is not None and record["session_id"] == item["session_id"]:
+                    item[field] = {
+                        key: value for key, value in record.items() if key != "session_id"
+                    }
+        return checks
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
@@ -724,34 +814,39 @@ class State:
             self.connection.execute("DELETE FROM interactions WHERE note_id = ?", (identifier,))
             self.connection.execute("DELETE FROM reminders WHERE note_id = ?", (identifier,))
 
-    def status(self) -> list[dict[str, Any]]:
+    def status(self, cwd: str | None = None) -> list[dict[str, Any]]:
+        scope, params = self._cwd_filter(cwd)
         return [
             {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
             for row in self.connection.execute(
-                "SELECT * FROM sessions ORDER BY last_attempt DESC LIMIT 20"
+                f"SELECT * FROM sessions WHERE {scope} ORDER BY last_attempt DESC LIMIT 20",
+                params,
             )
         ]
 
-    def diagnostics(self) -> dict[str, Any]:
-        def recent_checks(condition: str = "") -> list[dict[str, Any]]:
-            return [
-                {
-                    **dict(row),
-                    "model_called": bool(row["model_called"]),
-                    "usage_reported": bool(row["usage_reported"]),
-                    "diagnostics": json.loads(row["diagnostics"]),
-                }
-                for row in self.connection.execute(
-                    f"SELECT * FROM checks {condition} ORDER BY id DESC LIMIT 20"
-                )
-            ]
+    def diagnostics(
+        self, cwd: str | None = None, *, limit: int = 20, include_skipped: bool = False
+    ) -> dict[str, Any]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("History limit must be a positive integer")
+        scope, params = self._cwd_filter(cwd)
+
+        def recent_checks(condition: str = "1") -> list[dict[str, Any]]:
+            rows = self.connection.execute(
+                "SELECT checks.*, sessions.cwd FROM checks LEFT JOIN sessions USING (session_id) "
+                f"WHERE {scope} AND {condition} ORDER BY checks.id DESC LIMIT ?",
+                (*params, min(limit, 2**63 - 1)),
+            ).fetchall()
+            return self._hydrate_checks(rows)
 
         counts = {"pending": 0, "confirmed": 0, "suppressed": 0, "withdrawn": 0}
         counts.update(
             {
                 row["status"]: row["total"]
                 for row in self.connection.execute(
-                    "SELECT status, count(*) AS total FROM candidates GROUP BY status"
+                    "SELECT status, count(*) AS total FROM candidates "
+                    f"WHERE {scope} GROUP BY status",
+                    params,
                 )
             }
         )
@@ -759,7 +854,8 @@ class State:
             dict(row)
             for row in self.connection.execute(
                 "SELECT status, reason, count(*) AS total FROM candidates "
-                "WHERE reason != '' GROUP BY status, reason ORDER BY total DESC"
+                f"WHERE {scope} AND reason != '' GROUP BY status, reason ORDER BY total DESC",
+                params,
             )
         ]
         totals = dict(
@@ -773,11 +869,14 @@ class State:
                 "coalesce(sum(output_tokens), 0) AS output_tokens, "
                 "coalesce(sum(model_called), 0) AS model_calls, "
                 "coalesce(sum(model_called AND NOT usage_reported), 0) AS usage_unknown_calls "
-                "FROM checks"
+                f"FROM checks WHERE {scope}",
+                params,
             ).fetchone()
         )
         hooks: dict[str, dict[str, float]] = {}
-        for row in self.connection.execute("SELECT * FROM hook_events ORDER BY session_id, event"):
+        for row in self.connection.execute(
+            f"SELECT * FROM hook_events WHERE {scope} ORDER BY session_id, event", params
+        ):
             hooks.setdefault(row["session_id"], {})[row["event"]] = row["seen_at"]
         warnings = []
         for session_id, events in hooks.items():
@@ -798,21 +897,22 @@ class State:
         return {
             "candidates": counts,
             "candidate_reasons": reasons,
-            "recent_checks": recent_checks(),
+            "recent_checks": recent_checks("1" if include_skipped else "outcome != 'skipped'"),
             "recent_transcript_errors": recent_checks(
-                "WHERE json_array_length(diagnostics, '$.transcript_errors') > 0"
+                "json_array_length(diagnostics, '$.transcript_errors') > 0"
             ),
             "recent_evidence_rejections": recent_checks(
-                "WHERE json_type(diagnostics, '$.evidence_rejection') = 'object' "
+                "json_type(diagnostics, '$.evidence_rejection') = 'object' "
                 "AND json_extract(diagnostics, '$.evidence_rejection') != '{}'"
             ),
             "transcript_failure_threshold": _TRANSCRIPT_FAILURE_THRESHOLD,
             "unreviewable_sessions": [
                 {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
                 for row in self.connection.execute(
-                    "SELECT * FROM sessions WHERE consecutive_transcript_failures >= ? "
+                    f"SELECT * FROM sessions WHERE {scope} "
+                    "AND consecutive_transcript_failures >= ? "
                     "ORDER BY consecutive_transcript_failures DESC, touched_at DESC, session_id",
-                    (_TRANSCRIPT_FAILURE_THRESHOLD,),
+                    (*params, _TRANSCRIPT_FAILURE_THRESHOLD),
                 )
             ],
             **totals,
@@ -825,13 +925,25 @@ class State:
                     "sum(cached_input_tokens) AS cached_input_tokens, "
                     "sum(output_tokens) AS output_tokens, "
                     "sum(NOT usage_reported) AS usage_unknown_calls "
-                    "FROM checks WHERE model_called = 1 GROUP BY model, model_source "
-                    "ORDER BY model_calls DESC, model, model_source"
+                    f"FROM checks WHERE {scope} AND model_called = 1 GROUP BY model, model_source "
+                    "ORDER BY model_calls DESC, model, model_source",
+                    params,
                 )
             ],
             "hooks": hooks,
             "warnings": warnings,
-            "mutes": [dict(row) for row in self.connection.execute("SELECT * FROM mutes")],
+            "mutes": [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM mutes"
+                    if cwd is None
+                    else "SELECT * FROM mutes WHERE "
+                    "(scope = 'project' AND canonical_cwd(target) = ?) OR "
+                    "(scope = 'session' AND target IN (SELECT session_id FROM sessions "
+                    "WHERE canonical_cwd(cwd) = ? AND cwd != ''))",
+                    () if cwd is None else (*params, *params),
+                )
+            ],
         }
 
     def prune(self, retention_days: int, now: float) -> dict[str, int]:

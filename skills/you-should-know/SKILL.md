@@ -27,17 +27,24 @@ Use the command that matches the request:
 
 | Request | CLI arguments |
 | --- | --- |
-| Show open notes | `notes` |
-| Include known and dismissed notes | `notes --all` |
+| Show open notes and pending candidates | `notes` |
+| Include known and dismissed notes and candidate history | `notes --all` |
+| Inspect notes and candidates for one working directory | `notes --cwd PATH` |
 | Explain a note | `show ID` |
 | Mark a note as already known | `know ID` |
 | Dismiss a note | `dismiss ID` |
 | Inspect configuration and check status | `status` |
+| Inspect check status for one working directory | `status --cwd PATH` |
+| Include skipped checks or more recent history | `status --skipped --limit N` |
 | Check a specified transcript now | `check --transcript PATH --session SESSION` |
 
 Use the note identifier returned by the CLI. When explaining a note, distinguish its supporting transcript evidence from the reviewer's inference. A note is advisory; it does not authorize a code change or a new investigation.
 
-Findings remain hidden candidates until a separate confirmation checks subsequent work and disclosure. `status` reports pending, suppressed, and withdrawn candidate counts and reasons, recent outcomes, reported token usage, errors, latency, and hook sightings. An unconfirmed candidate is not a verified note. The default budget is 30 model calls per session per rolling hour, including confirmations; an explicit legacy lifetime limit still applies. Inactive state expires after 30 days by default.
+Findings remain candidates until a separate confirmation checks subsequent work and disclosure. Automatic alerts show only confirmed notes. The `notes` response contains separate `notes` and `candidates` lists; candidates are compact summaries without stored transcripts or evidence. The default candidate list shows only pending findings; `notes --all` includes confirmed, suppressed, and withdrawn history. A candidate is not a verified note. Its numeric ID cannot be used with `show`, `know`, or `dismiss`. Do not present pending or withdrawn concerns as established defects.
+
+`status` reports candidate counts and reasons, recent outcomes, reported token usage, errors, latency, and hook sightings. `recent_checks` omits skipped checks by default; `--skipped` includes them, and totals always count them. `--limit N` is a positive integer controlling each recent-check list, defaulting to 20; it does not limit aggregates. Linked candidate and note summaries reflect their current retained state, while each check's outcome and reason describe that check. Null links in older records are unknown, and expired objects have null summaries.
+
+Use `--cwd PATH` when the user requests one project's notes or diagnostics. Matching uses the session's latest recorded working directory with relative paths and symlinks resolved, not a repository-wide subtree. Records with no known session directory remain available only in unfiltered output. The filter applies to all diagnostic lists and aggregates; configuration is global. Manual checks record the invoking working directory for their supplied session. The default budget remains 30 model calls per session per rolling hour, including confirmations; an explicit legacy lifetime limit still applies. Inactive state expires after 30 days by default.
 
 `recent_checks` records the requested model ID and its source (`config`, `hook`, or `argument`) for model calls. `model_usage` groups calls, errors, tokens, and calls with unknown usage by model and source. A `cli_default` source with a null model means the reviewer CLI selected an unreported model. Null model metadata in older records is unknown. Do not infer those model IDs from the current chat or configuration. Review and confirmation can use different models if the chat's selection changes between checks. The plugin's configured model takes precedence over hook models and manual `--model` arguments.
 

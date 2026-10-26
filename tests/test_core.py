@@ -366,7 +366,7 @@ def test_busy_worker_does_not_spend_check_budget(state, transcript, monkeypatch)
     assert result["reason"] == "review is busy"
     assert result["latency"] >= 0
     assert result["usage"] == {}
-    recorded = state.diagnostics()["recent_checks"][0]
+    recorded = state.diagnostics(include_skipped=True)["recent_checks"][0]
     assert recorded["outcome"] == "skipped"
     assert recorded["reason"] == "review is busy"
     assert recorded["latency"] == result["latency"]

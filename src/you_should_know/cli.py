@@ -107,6 +107,8 @@ def check(
             model=selected_model,
             model_source=model_source,
             diagnostics=diagnostics,
+            candidate_id=details.get("candidate_id"),
+            note_id=details.get("note", {}).get("id"),
         )
         return {
             "status": status,
@@ -185,12 +187,12 @@ def check(
 
     def hold(candidate: dict[str, Any], reason: str) -> dict[str, Any]:
         if not state.resolve_candidate(candidate["id"], "pending", reason, time.time()):
-            return outcome("skipped", "candidate already resolved")
+            return outcome("skipped", "candidate already resolved", candidate_id=candidate["id"])
         if event == "Stop" and state.notice_once(session_id, f"pending:{candidate['id']}:{reason}"):
             state.queue_error(
                 session_id,
                 f"You Should Know: a candidate is still unconfirmed ({reason}). "
-                "It is retained for the next eligible check; inspect it with status.",
+                "It is retained for the next eligible check; inspect it with notes.",
             )
         return outcome("pending", reason, candidate_id=candidate["id"])
 
@@ -270,8 +272,9 @@ def check(
                 suppressed: list[dict] = []
                 finding = parse_finding(response, evidence_transcript, suppressed=suppressed)
                 state.finish(session_id, time.time(), digest)
+                suppressed_id = None
                 for item in suppressed:
-                    state.candidate(
+                    suppressed_id = state.candidate(
                         session_id,
                         item["finding"],
                         time.time(),
@@ -285,6 +288,7 @@ def check(
                     return outcome(
                         "suppressed" if suppressed else "clear",
                         suppressed[0]["reason"] if suppressed else "",
+                        candidate_id=suppressed_id,
                     )
                 duplicate = state.has_topic(finding.topic)
                 identifier = state.candidate(
@@ -299,7 +303,7 @@ def check(
                     checkpoint=checkpoint,
                 )
                 if duplicate:
-                    return outcome("duplicate", "topic already recorded")
+                    return outcome("duplicate", "topic already recorded", candidate_id=identifier)
                 pending = outcome("pending", "awaiting confirmation", candidate_id=identifier)
                 if event != "Stop":
                     return pending
@@ -352,13 +356,19 @@ def check(
                 identifier = None
             state.finish(session_id, time.time(), digest)
             if identifier:
-                return outcome("finding", reason, note=state.note(identifier))
-            return outcome("duplicate" if confirmed else "withdrawn", reason)
+                return outcome(
+                    "finding", reason, candidate_id=candidate["id"], note=state.note(identifier)
+                )
+            return outcome(
+                "duplicate" if confirmed else "withdrawn", reason, candidate_id=candidate["id"]
+            )
         except TranscriptChanged as error:
             if candidate:
                 state.resolve_candidate(candidate["id"], "withdrawn", str(error), time.time())
             state.finish(session_id, time.time(), "")
-            return outcome("withdrawn", str(error))
+            return outcome(
+                "withdrawn", str(error), candidate_id=candidate["id"] if candidate else None
+            )
         except (backend.BackendError, AssessmentError, TranscriptError) as error:
             usage = getattr(error, "usage", usage)
             detail = str(error)[:500]
@@ -379,7 +389,11 @@ def check(
                 else "error"
             )
             result = outcome(
-                status, detail, error=detail, notify=status == "error" and not session.last_error
+                status,
+                detail,
+                candidate_id=candidate["id"] if candidate else None,
+                error=detail,
+                notify=status == "error" and not session.last_error,
             )
             if not force and result["notify"]:
                 state.queue_error(session_id, hook_result(result)["systemMessage"])
@@ -597,6 +611,16 @@ def read_event() -> dict[str, Any]:
     return event
 
 
+def positive_int(value: str) -> int:
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if result < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return result
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="you-should-know", description="Independent advisory checks for Codex conversations."
@@ -605,8 +629,11 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("hook", help="Handle a Codex lifecycle event on stdin")
     commands.add_parser("notify", help="Display queued notes from a synchronous Codex hook")
-    notes = commands.add_parser("notes", help="List unread notes as JSON")
-    notes.add_argument("--all", action="store_true", help="Include known and dismissed notes")
+    notes = commands.add_parser("notes", help="List unread notes and pending candidates as JSON")
+    notes.add_argument(
+        "--all", action="store_true", help="Include known and dismissed notes and candidate history"
+    )
+    notes.add_argument("--cwd", metavar="PATH", help="Limit to this recorded working directory")
     for name, help_text in (
         ("show", "Read a note"),
         ("know", "Mark a topic as known"),
@@ -614,7 +641,18 @@ def parser() -> argparse.ArgumentParser:
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("id", help="Exact note ID from a Heads up warning or notes")
-    commands.add_parser("status", help="Show settings and recent check outcomes")
+    status = commands.add_parser("status", help="Show settings and recent check outcomes")
+    status.add_argument("--cwd", metavar="PATH", help="Limit to this recorded working directory")
+    status.add_argument(
+        "--limit",
+        type=positive_int,
+        default=20,
+        metavar="N",
+        help="Recent checks per list (default: 20)",
+    )
+    status.add_argument(
+        "--skipped", action="store_true", help="Include skipped checks in recent history"
+    )
     manual = commands.add_parser("check", help="Review a transcript now, bypassing rate limits")
     manual.add_argument("--transcript", type=Path, required=True)
     manual.add_argument("--session", required=True)
@@ -742,9 +780,13 @@ def main(argv: list[str] | None = None) -> int:
             if event["hook_event_name"] == "Stop":
                 state.prune(config.retention_days, time.time())
         elif args.command == "check":
+            state.observe(args.session, False, cwd=str(Path.cwd()))
             output = check(state, config, args.session, args.transcript, "Stop", args.model, True)
         elif args.command == "notes":
-            output = {"notes": state.notes(args.all)}
+            output = {
+                "notes": state.notes(args.all, cwd=args.cwd),
+                "candidates": state.candidates(cwd=args.cwd, all_candidates=args.all),
+            }
         elif args.command == "show":
             output = state.note(args.id)
         elif args.command in {"know", "dismiss"}:
@@ -755,8 +797,8 @@ def main(argv: list[str] | None = None) -> int:
             output = {
                 "data_directory": str(directory),
                 "config": asdict(config),
-                "sessions": state.status(),
-                **state.diagnostics(),
+                "sessions": state.status(cwd=args.cwd),
+                **state.diagnostics(cwd=args.cwd, limit=args.limit, include_skipped=args.skipped),
             }
         print(json.dumps(output, ensure_ascii=False, indent=None if is_hook else 2))
         return 1 if not is_hook and output.get("status") == "error" else 0

@@ -271,7 +271,7 @@ def test_telemetry_counts_calls_without_usage_and_excludes_noop_checks(tmp_path)
     state.record_check("session", "Stop", "clear", 101, 1, {}, model_called=True)
     state.record_check("session", "Stop", "unchanged", 102, 0)
     state.record_check("session", "Stop", "skipped", 103, 0, {})
-    report = state.diagnostics()
+    report = state.diagnostics(include_skipped=True)
     assert report["total_checks"] == 4
     assert report["model_calls"] == 2
     assert report["usage_unknown_calls"] == 2
@@ -337,7 +337,7 @@ def test_model_usage_groups_calls_and_excludes_skipped_checks(tmp_path):
             model_source="hook",
         )
     state.record_check("s", "Stop", "skipped", 101, 0, model="gpt-6-astra", model_source="hook")
-    report = state.diagnostics()
+    report = state.diagnostics(include_skipped=True)
     assert report["model_usage"] == [
         {
             "model": "gpt-6-astra",
