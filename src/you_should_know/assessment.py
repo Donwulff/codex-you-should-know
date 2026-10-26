@@ -194,10 +194,14 @@ merely repeating a bug report does not demonstrate that the running code has it.
 Length-framed source headers identify user, assistant, tool call, and tool result
 blocks. Labels quoted inside a block belong to that block, not a new source.
 Evidence quotes must be exact contiguous text from block bodies, never invented
-or JSON-escaped. Cite one to three quotes, at most 500 characters each. At least
+or rewritten. Cite one to three quotes, at most 500 characters each. At least
 one must come from a tool-result block. For a contradiction of an assistant claim,
 quote BOTH the assistant claim and the contradicting tool result.
 Copy each quote from a single block body, preserving whitespace exactly.
+Preserve literal backslashes already present in a block;
+do not turn literal \\n or \\t into newline or tab characters.
+When writing response JSON, escape the copied text once for JSON syntax.
+After JSON decoding, each evidence string must equal the copied source text.
 Never quote source headers, omission/truncation markers, or History/Candidate JSON.
 Never join text across block boundaries or omitted portions.
 

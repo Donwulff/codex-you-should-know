@@ -7,10 +7,15 @@
         {
           "type": "object",
           "properties": {
-            "topic": {"type": "string"},
-            "summary": {"type": "string"},
-            "explanation": {"type": "string"},
-            "evidence": {"type": "array", "items": {"type": "string"}},
+            "topic": {"type": "string", "minLength": 1, "maxLength": 160},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 280},
+            "explanation": {"type": "string", "minLength": 1, "maxLength": 1600},
+            "evidence": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": {"type": "string", "minLength": 1, "maxLength": 500}
+            },
             "agent_still_working": {"type": "boolean"},
             "assistant_claim": {"type": "boolean"}
           },

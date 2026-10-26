@@ -26,6 +26,7 @@ from .host import noninteractive_host
 from .shortcuts import configure_shortcuts
 from .state import Session, State, review_lock
 from .transcript import (
+    TranscriptChanged,
     TranscriptError,
     last_assistant_message,
     read_since_snapshot,
@@ -48,6 +49,11 @@ def eligible(session: Session, config: Config, event: str, now: float, force: bo
         return False
     if event == "Stop":
         return True
+    if (
+        session.last_transcript_failure
+        and now - session.last_transcript_failure < config.min_interval_seconds
+    ):
+        return False
     if session.attempts and now - session.last_attempt < config.min_interval_seconds:
         return False
     return session.events - session.checked_events >= config.every_n_tools
@@ -112,24 +118,38 @@ def check(
             **details,
         }
 
-    def read(offset: int | None = None) -> tuple[str, int]:
+    def read(
+        offset: int | None = None, expected_checkpoint: dict[str, str] | None = None
+    ) -> tuple[str, int, dict[str, str]]:
         nonlocal transcript_available, full_read
         for attempt in range(2):
+            checkpoint: dict[str, str] = {}
             try:
                 if offset is None:
                     unknown_types.clear()
                     result = read_snapshot(
-                        transcript_path, config.max_context_chars, unknown_types=unknown_types
+                        transcript_path,
+                        config.max_context_chars,
+                        unknown_types=unknown_types,
+                        checkpoint=checkpoint,
                     )
                     if not result[0].strip():
                         raise TranscriptError("Conversation has no visible messages yet")
                     full_read = True
                     diagnostics["unknown_record_types"] = dict(unknown_types)
                 else:
-                    result = read_since_snapshot(transcript_path, offset, config.max_context_chars)
+                    result = read_since_snapshot(
+                        transcript_path,
+                        offset,
+                        config.max_context_chars,
+                        expected_checkpoint=expected_checkpoint,
+                        checkpoint=checkpoint,
+                    )
                 transcript_available = True
-                return result
+                return *result, checkpoint
             except TranscriptError as error:
+                if isinstance(error, TranscriptChanged) and offset is not None:
+                    raise
                 transcript_available = False
                 detail = dict(error.diagnostics)
                 if not detail:
@@ -207,9 +227,23 @@ def check(
         response: object = None
         evidence_transcript = ""
         try:
-            transcript, offset = read()
+            transcript, offset, checkpoint = read()
             digest = hashlib.sha256(transcript.encode()).hexdigest()
-            if not candidate and digest == session.last_hash and not force:
+            subsequent_read = None
+            restarted = False
+            if candidate:
+                try:
+                    subsequent_read = read(candidate["offset"], candidate["checkpoint"])
+                except TranscriptChanged as error:
+                    state.resolve_candidate(candidate["id"], "withdrawn", str(error), time.time())
+                    state.finish(session_id, time.time(), "")
+                    diagnostics["candidate_reset"] = {
+                        "candidate_id": candidate["id"],
+                        "reason": str(error),
+                    }
+                    candidate = None
+                    restarted = True
+            if not candidate and not restarted and digest == session.last_hash and not force:
                 state.finish(session_id, time.time(), digest)
                 return outcome("unchanged")
             if not candidate:
@@ -245,6 +279,7 @@ def check(
                         offset,
                         status="suppressed",
                         reason=item["reason"],
+                        checkpoint=checkpoint,
                     )
                 if not finding:
                     return outcome(
@@ -261,6 +296,7 @@ def check(
                     status="suppressed" if duplicate else "pending",
                     reason="topic already recorded" if duplicate else "awaiting confirmation",
                     assistant_claim=response["finding"]["assistant_claim"],
+                    checkpoint=checkpoint,
                 )
                 if duplicate:
                     return outcome("duplicate", "topic already recorded")
@@ -280,7 +316,9 @@ def check(
                 return hold(candidate, "check time limit reached")
             if not budget():
                 return hold(candidate, "budget exhausted")
-            subsequent, confirmation_offset = read(candidate["offset"])
+            subsequent, confirmation_offset, confirmation_checkpoint = subsequent_read or read(
+                candidate["offset"], candidate["checkpoint"]
+            )
             finding = Finding(
                 **{key: candidate[key] for key in ("topic", "summary", "explanation", "evidence")}
             )
@@ -305,7 +343,7 @@ def check(
                 evidence_transcript,
                 assistant_claim=candidate["assistant_claim"],
             )
-            if confirmed and read(confirmation_offset)[0]:
+            if confirmed and read(confirmation_offset, confirmation_checkpoint)[0]:
                 confirmed, reason = False, "Conversation advanced during confirmation"
             if confirmed:
                 identifier = state.publish_candidate(candidate["id"], time.time(), notify=not force)
@@ -316,6 +354,11 @@ def check(
             if identifier:
                 return outcome("finding", reason, note=state.note(identifier))
             return outcome("duplicate" if confirmed else "withdrawn", reason)
+        except TranscriptChanged as error:
+            if candidate:
+                state.resolve_candidate(candidate["id"], "withdrawn", str(error), time.time())
+            state.finish(session_id, time.time(), "")
+            return outcome("withdrawn", str(error))
         except (backend.BackendError, AssessmentError, TranscriptError) as error:
             usage = getattr(error, "usage", usage)
             detail = str(error)[:500]

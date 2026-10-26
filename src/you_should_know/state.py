@@ -30,6 +30,7 @@ class Session:
     cwd: str = ""
     consecutive_transcript_failures: int = 0
     unknown_record_types: str = "{}"
+    last_transcript_failure: float = 0
 
 
 class State:
@@ -135,6 +136,10 @@ class State:
                 touched_at REAL NOT NULL,
                 PRIMARY KEY(scope, target)
             );
+            CREATE TABLE IF NOT EXISTS transcript_retries (
+                session_id TEXT PRIMARY KEY,
+                last_failure REAL NOT NULL
+            );
         """)
         with self._transaction():
             columns = self.connection.execute("PRAGMA table_info(interactions)").fetchall()
@@ -177,6 +182,7 @@ class State:
                 ("interactions", "ready_at", "REAL NOT NULL DEFAULT 0"),
                 ("notifications", "created_at", "REAL NOT NULL DEFAULT 0"),
                 ("candidates", "assistant_claim", "INTEGER NOT NULL DEFAULT 0"),
+                ("candidates", "checkpoint", "TEXT NOT NULL DEFAULT '{}'"),
                 ("checks", "model_called", "INTEGER NOT NULL DEFAULT 0"),
                 ("checks", "usage_reported", "INTEGER NOT NULL DEFAULT 0"),
                 ("checks", "model", "TEXT"),
@@ -220,7 +226,10 @@ class State:
 
     def session(self, session_id: str) -> Session:
         row = self.connection.execute(
-            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            "SELECT sessions.*, coalesce(transcript_retries.last_failure, 0) "
+            "AS last_transcript_failure FROM sessions LEFT JOIN transcript_retries "
+            "USING (session_id) WHERE sessions.session_id = ?",
+            (session_id,),
         ).fetchone()
         if row is None:
             raise ValueError("Unknown session")
@@ -246,6 +255,17 @@ class State:
                     session_id,
                 ),
             )
+            if failed:
+                self.connection.execute(
+                    "INSERT INTO transcript_retries(session_id, last_failure) "
+                    "SELECT session_id, ? FROM sessions WHERE session_id = ? "
+                    "ON CONFLICT(session_id) DO UPDATE SET last_failure = excluded.last_failure",
+                    (time.time(), session_id),
+                )
+            else:
+                self.connection.execute(
+                    "DELETE FROM transcript_retries WHERE session_id = ?", (session_id,)
+                )
 
     def begin(self, session_id: str, now: float) -> None:
         with self.connection:
@@ -324,14 +344,15 @@ class State:
         status: str = "pending",
         reason: str = "",
         assistant_claim: bool = False,
+        checkpoint: dict[str, str] | None = None,
     ) -> int:
         if status not in {"pending", "suppressed"}:
             raise ValueError("Invalid initial candidate status")
         with self.connection:
             cursor = self.connection.execute(
                 "INSERT INTO candidates(session_id, topic, summary, explanation, evidence, "
-                "transcript, offset, status, reason, created_at, touched_at, assistant_claim) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "transcript, offset, status, reason, created_at, touched_at, assistant_claim, "
+                "checkpoint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     finding.topic,
@@ -345,6 +366,7 @@ class State:
                     now,
                     now,
                     assistant_claim,
+                    json.dumps(checkpoint or {}),
                 ),
             )
         assert cursor.lastrowid is not None
@@ -679,6 +701,8 @@ class State:
         result["evidence"] = json.loads(result["evidence"])
         if "assistant_claim" in result:
             result["assistant_claim"] = bool(result["assistant_claim"])
+        if "checkpoint" in result:
+            result["checkpoint"] = json.loads(result["checkpoint"])
         result.pop("touched_at", None)
         return result
 
@@ -833,6 +857,10 @@ class State:
                         f"DELETE FROM {table} WHERE created_at < ?", (cutoff,)
                     )
                     removed[table] = cursor.rowcount
+                removed["transcript_retries"] = self.connection.execute(
+                    "DELETE FROM transcript_retries WHERE session_id NOT IN "
+                    "(SELECT session_id FROM sessions)"
+                ).rowcount
                 removed["hook_events"] = self.connection.execute(
                     "DELETE FROM hook_events WHERE seen_at < ?", (cutoff,)
                 ).rowcount

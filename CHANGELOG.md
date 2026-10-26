@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-26
+
+### Fixed
+
+- Validate saved transcript cursors against the source path and a hash of the complete reviewed prefix. If the transcript changes or an older candidate lacks a checkpoint, withdraw that candidate and review the current conversation again. Recheck continuity before publishing a confirmed note.
+- Apply the configured background retry interval after transcript-read failures without spending model-call budget. End-of-turn and explicit manual checks still bypass that interval.
+- Keep retry timestamps separate from session rows so hooks from 0.3.2 can continue using the shared database during an upgrade.
+- Match reviewer output schemas to the existing text-length and evidence-count limits. Clarify that evidence must preserve literal backslashes already present in source text, while escaping the response JSON correctly. Exact evidence and source validation remain unchanged.
+
 ### Added
 
 - Added optional shortcut setup through a bundled skill and `shortcuts install`. Press Alt+Y, release the keys, then 1–4 to submit `ysk 1` through `ysk 4` using Codex CLI presets. Existing note-menu stages and reply windows still apply.
@@ -164,7 +173,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.6...v0.3.0

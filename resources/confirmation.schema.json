@@ -2,8 +2,13 @@
   "type": "object",
   "properties": {
     "confirmed": {"type": "boolean"},
-    "reason": {"type": "string"},
-    "evidence": {"type": "array", "items": {"type": "string"}}
+    "reason": {"type": "string", "minLength": 1, "maxLength": 800},
+    "evidence": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 3,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    }
   },
   "required": ["confirmed", "reason", "evidence"],
   "additionalProperties": false
