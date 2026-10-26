@@ -664,7 +664,7 @@ def test_recent_checks_omit_skipped_and_attach_candidate_results(tmp_path):
         model="gpt-6.1-sol",
         model_source="hook",
     )
-    limited = state.diagnostics(check_limit=1)
+    limited = state.diagnostics(limit=1)
     assert [row["outcome"] for row in limited["recent_checks"]] == ["finding"]
     assert limited["recent_checks"][0]["note"]["id"] == note_id
     assert limited["recent_checks"][0]["candidate"]["topic"] == "Topic A"

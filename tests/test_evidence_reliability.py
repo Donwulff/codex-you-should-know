@@ -31,6 +31,32 @@ def test_exact_crlf_evidence_matches_the_literal_prompt():
     ) == (True, "Unresolved")
 
 
+@pytest.mark.parametrize("confirmation", [False, True])
+def test_prompts_preserve_literal_escapes_without_decoding_them(confirmation):
+    quote = r'{"output":"first\nsecond\tC:\\tmp"}'
+    transcript = frame("tool result: id=1", quote)
+    candidate = assessment.Finding("topic", "summary", "explanation", [quote])
+    prompt = (
+        assessment.make_confirmation_prompt(candidate, transcript, "")
+        if confirmation
+        else assessment.make_prompt(transcript, [])
+    )
+    assert "Preserve literal backslashes already present in a block" in prompt
+    assert "do not turn literal \\n or \\t into newline or tab characters" in prompt
+    assert "After JSON decoding, each evidence string must equal the copied source text" in prompt
+    evidence = [quote]
+    response = (
+        {"confirmed": True, "reason": "Unresolved", "evidence": evidence}
+        if confirmation
+        else finding_response(evidence)
+    )
+    parse = assessment.parse_confirmation if confirmation else assessment.parse_finding
+    assert parse(json.loads(json.dumps(response)), transcript)
+    evidence[0] = quote.replace(r"\n", "\n").replace(r"\t", "\t")
+    with pytest.raises(assessment.AssessmentError, match="does not occur"):
+        parse(response, transcript)
+
+
 @pytest.mark.parametrize("kind", ["header", "boundary", "truncation"])
 def test_each_quote_must_be_contained_in_actual_block_text(kind):
     tool = frame("tool result: id=1", "preferences lost")

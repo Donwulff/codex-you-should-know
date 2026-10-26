@@ -143,9 +143,15 @@ def test_successful_slow_read_cannot_start_model_after_deadline(
     write_rollout(path)
     if phase == "confirmation":
         state.observe("s", False)
-        text, offset = cli.read_snapshot(path)
+        checkpoint = {}
+        text, offset = cli.read_snapshot(path, checkpoint=checkpoint)
         state.candidate(
-            "s", Finding("failure", "Failure", "Failure", ["Command failed"]), 100, text, offset
+            "s",
+            Finding("failure", "Failure", "Failure", ["Command failed"]),
+            100,
+            text,
+            offset,
+            checkpoint=checkpoint,
         )
     now = [0.0]
     reader = "read_snapshot" if phase == "review" else "read_since_snapshot"
@@ -189,9 +195,15 @@ def test_confirmation_read_failure_preserves_budget_and_candidate_safety(
     path = tmp_path / "rollout.jsonl"
     write_rollout(path)
     state.observe("s", False)
-    text, offset = cli.read_snapshot(path)
+    checkpoint = {}
+    text, offset = cli.read_snapshot(path, checkpoint=checkpoint)
     state.candidate(
-        "s", Finding("failure", "Failure", "Failure", ["Command failed"]), 100, text, offset
+        "s",
+        Finding("failure", "Failure", "Failure", ["Command failed"]),
+        100,
+        text,
+        offset,
+        checkpoint=checkpoint,
     )
     monkeypatch.setattr(cli.time, "sleep", lambda delay: None)
 

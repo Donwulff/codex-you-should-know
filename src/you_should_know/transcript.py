@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from typing import Any, BinaryIO
 _MAX_LINE_BYTES = 1_048_576
 _TRUNCATED = "\n[... content truncated ...]\n"
 _OMITTED = "[... earlier conversation omitted ...]"
+_INCOMPLETE = "[Incomplete final transcript record omitted]"
 _ROLLOUT_TYPES = {
     "session_meta",
     "response_item",
@@ -33,6 +35,10 @@ class TranscriptError(ValueError):
     def __init__(self, message: str, *, diagnostics: dict[str, Any] | None = None):
         super().__init__(message)
         self.diagnostics = diagnostics or {}
+
+
+class TranscriptChanged(TranscriptError):
+    """A saved cursor no longer identifies the reviewed transcript prefix."""
 
 
 def _location(path: Path) -> dict[str, Any]:
@@ -121,7 +127,12 @@ def _clip_block(block: str, limit: int) -> str:
 
 
 def _records(
-    stream: BinaryIO, *, complete_only: bool = False, location: dict[str, Any] | None = None
+    stream: BinaryIO,
+    *,
+    complete_only: bool = False,
+    location: dict[str, Any] | None = None,
+    checkpoint: dict[str, str] | None = None,
+    digest: Any = None,
 ) -> Iterator[tuple[dict | None, str | None]]:
     line_number = 0
     while True:
@@ -129,29 +140,40 @@ def _records(
         raw = stream.readline(_MAX_LINE_BYTES + 1)
         if not raw:
             return
+        record_digest = digest.copy() if digest is not None else None
+        if record_digest is not None:
+            record_digest.update(raw)
         line_number += 1
         if location is not None:
             location.update(line_number=line_number, line_prefix=repr(raw[:200]), byte_offset=start)
         if len(raw) > _MAX_LINE_BYTES:
             while raw and not raw.endswith(b"\n"):
                 raw = stream.readline(_MAX_LINE_BYTES + 1)
+                if record_digest is not None:
+                    record_digest.update(raw)
             if complete_only and not raw.endswith(b"\n"):
                 stream.seek(start)
-                yield None, "[Incomplete final transcript record omitted]"
+                yield None, _INCOMPLETE
                 return
+            if checkpoint is not None and record_digest is not None:
+                digest = record_digest
+                checkpoint["sha256"] = digest.hexdigest()
             yield None, "[Oversized transcript record omitted]"
             continue
         if complete_only and not raw.endswith(b"\n"):
             stream.seek(start)
-            yield None, "[Incomplete final transcript record omitted]"
+            yield None, _INCOMPLETE
             return
+        if checkpoint is not None and record_digest is not None:
+            digest = record_digest
+            checkpoint["sha256"] = digest.hexdigest()
         if not raw.strip():
             continue
         try:
             row = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if not raw.endswith(b"\n"):
-                yield None, "[Incomplete final transcript record omitted]"
+                yield None, _INCOMPLETE
                 return
             raise TranscriptError(f"Invalid JSONL at transcript line {line_number}") from exc
         if not isinstance(row, dict):
@@ -211,6 +233,8 @@ def _read(
     offset: int = 0,
     complete_only: bool = False,
     unknown_types: dict[str, int] | None = None,
+    checkpoint: dict[str, str] | None = None,
+    expected_checkpoint: dict[str, str] | None = None,
 ) -> tuple[str, int]:
     """Return visible text, retaining the first three user messages and recent work.
 
@@ -220,20 +244,54 @@ def _read(
     """
     if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 256:
         raise ValueError("max_chars must be an integer of at least 256")
+    if expected_checkpoint is not None and checkpoint is None:
+        checkpoint = {}
     recent: deque[tuple[int, str]] = deque()
     total = 0
     initial: list[tuple[int, str]] = []
     omitted = False
     recognized = offset > 0
     sequence = 0
+    incomplete_tail = False
     location = _location(path)
     unknown: dict[str, int] = {}
     try:
         with _stream(path, location) as stream:
+            before = os.fstat(stream.fileno())
+            digest = hashlib.sha256()
+            if expected_checkpoint is not None:
+                if not expected_checkpoint.get("sha256"):
+                    raise TranscriptChanged(
+                        "Transcript checkpoint is unavailable; review restarted"
+                    )
+                if expected_checkpoint.get("path") != str(path.resolve()):
+                    raise TranscriptChanged("Transcript path changed; review restarted")
+            if offset and (checkpoint is not None or expected_checkpoint is not None):
+                remaining = offset
+                while remaining:
+                    chunk = stream.read(min(remaining, _MAX_LINE_BYTES))
+                    if not chunk:
+                        raise TranscriptChanged("Transcript was truncated; review restarted")
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+            if (
+                expected_checkpoint is not None
+                and digest.hexdigest() != expected_checkpoint["sha256"]
+            ):
+                raise TranscriptChanged("Transcript prefix changed; review restarted")
+            if checkpoint is not None:
+                checkpoint.update(path=str(path.resolve()), sha256=digest.hexdigest())
             stream.seek(offset)
-            for row, marker in _records(stream, complete_only=complete_only, location=location):
+            for row, marker in _records(
+                stream,
+                complete_only=complete_only,
+                location=location,
+                checkpoint=checkpoint,
+                digest=digest if checkpoint is not None else None,
+            ):
                 user = False
                 if row is None:
+                    incomplete_tail = marker == _INCOMPLETE
                     block = marker or ""
                 else:
                     kind = row.get("type")
@@ -269,6 +327,37 @@ def _read(
                     total -= len(removed) + 2
                     omitted = True
             cursor = stream.tell()
+            if checkpoint is not None:
+                after = path.stat()
+                identity = (before.st_dev, before.st_ino)
+                if (after.st_dev, after.st_ino) != identity:
+                    raise TranscriptChanged("Transcript file was replaced; review restarted")
+                if after.st_size > cursor and not incomplete_tail:
+                    raise TranscriptError("Transcript advanced during snapshot validation")
+                if (before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                ):
+                    stream.seek(0)
+                    digest = hashlib.sha256()
+                    remaining = cursor
+                    while remaining:
+                        chunk = stream.read(min(remaining, _MAX_LINE_BYTES))
+                        if not chunk:
+                            raise TranscriptChanged("Transcript was truncated; review restarted")
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if digest.hexdigest() != checkpoint["sha256"]:
+                        raise TranscriptChanged("Transcript prefix changed; review restarted")
+                    current = path.stat()
+                    if (current.st_dev, current.st_ino) != identity:
+                        raise TranscriptChanged("Transcript file was replaced; review restarted")
+                    if (current.st_mtime_ns, current.st_ctime_ns, current.st_size) != (
+                        after.st_mtime_ns,
+                        after.st_ctime_ns,
+                        after.st_size,
+                    ):
+                        raise TranscriptError("Transcript changed during snapshot validation")
         if not recognized:
             raise TranscriptError("Empty or unsupported transcript; expected a Codex JSONL rollout")
     except TranscriptError as exc:
@@ -308,25 +397,47 @@ def read_transcript(path: Path, max_chars: int = 60_000) -> str:
 
 
 def read_snapshot(
-    path: Path, max_chars: int = 60_000, *, unknown_types: dict[str, int] | None = None
+    path: Path,
+    max_chars: int = 60_000,
+    *,
+    unknown_types: dict[str, int] | None = None,
+    checkpoint: dict[str, str] | None = None,
 ) -> tuple[str, int]:
     """Return visible complete JSONL records and the byte cursor after them."""
-    return _read(path, max_chars, complete_only=True, unknown_types=unknown_types)
+    return _read(
+        path, max_chars, complete_only=True, unknown_types=unknown_types, checkpoint=checkpoint
+    )
 
 
 def read_since(path: Path, offset: int, max_chars: int = 60_000) -> str:
     return read_since_snapshot(path, offset, max_chars)[0]
 
 
-def read_since_snapshot(path: Path, offset: int, max_chars: int = 60_000) -> tuple[str, int]:
+def read_since_snapshot(
+    path: Path,
+    offset: int,
+    max_chars: int = 60_000,
+    *,
+    expected_checkpoint: dict[str, str] | None = None,
+    checkpoint: dict[str, str] | None = None,
+) -> tuple[str, int]:
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise ValueError("offset must be a nonnegative integer")
     try:
         if path.stat().st_size < offset:
+            if expected_checkpoint is not None:
+                raise TranscriptChanged("Transcript was truncated; review restarted")
             return "[Transcript was truncated; subsequent context is unavailable]", offset
     except OSError as exc:
         raise TranscriptError(f"Cannot read transcript: {exc.strerror}") from exc
-    return _read(path, max_chars, offset=offset, complete_only=True)
+    return _read(
+        path,
+        max_chars,
+        offset=offset,
+        complete_only=True,
+        checkpoint=checkpoint,
+        expected_checkpoint=expected_checkpoint,
+    )
 
 
 def last_assistant_message(path: Path) -> str:

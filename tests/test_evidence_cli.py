@@ -59,7 +59,8 @@ def test_check_rejects_evidence_removed_from_model_input(state, tmp_path, monkey
     path = tmp_path / "rollout.jsonl"
     if phase == "confirmation":
         append_result(path, "Command failed")
-        text, offset = read_snapshot(path)
+        checkpoint = {}
+        text, offset = read_snapshot(path, checkpoint=checkpoint)
         state.observe("s", False)
         state.candidate(
             "s",
@@ -67,6 +68,7 @@ def test_check_rejects_evidence_removed_from_model_input(state, tmp_path, monkey
             100,
             text,
             offset,
+            checkpoint=checkpoint,
         )
     append_result(path, "FIRST" + "漢" * 60000 + "UNSEEN INTERIOR" + "界" * 60000 + "LAST")
     assert "UNSEEN INTERIOR" in read_snapshot(path, 200000)[0]
@@ -126,9 +128,15 @@ def test_check_persists_rejected_quotes_and_nearest_span(state, tmp_path, monkey
     append_result(path, "alpha\nbeta")
     if phase == "confirmation":
         state.observe("s", False)
-        text, offset = read_snapshot(path)
+        checkpoint = {}
+        text, offset = read_snapshot(path, checkpoint=checkpoint)
         state.candidate(
-            "s", Finding("result failure", "Failure", "Failure", ["alpha\nbeta"]), 100, text, offset
+            "s",
+            Finding("result failure", "Failure", "Failure", ["alpha\nbeta"]),
+            100,
+            text,
+            offset,
+            checkpoint=checkpoint,
         )
     response = (
         finding_response("alpha\nbeto")

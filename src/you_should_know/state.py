@@ -16,6 +16,22 @@ from .config import Config
 _TRANSCRIPT_FAILURE_THRESHOLD = 3
 
 
+def _canonical_cwd(cwd: str) -> str:
+    if not cwd:
+        return ""
+    try:
+        return str(Path(cwd).expanduser().resolve())
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"Cannot resolve working directory: {cwd}") from error
+
+
+def _stored_cwd(cwd: str | None) -> str:
+    try:
+        return _canonical_cwd(cwd or "")
+    except ValueError:
+        return ""
+
+
 @dataclass(frozen=True)
 class Session:
     session_id: str
@@ -30,6 +46,7 @@ class Session:
     cwd: str = ""
     consecutive_transcript_failures: int = 0
     unknown_record_types: str = "{}"
+    last_transcript_failure: float = 0
 
 
 class State:
@@ -41,6 +58,7 @@ class State:
         os.close(descriptor)
         self.connection = sqlite3.connect(path, timeout=5)
         self.connection.row_factory = sqlite3.Row
+        self.connection.create_function("canonical_cwd", 1, _stored_cwd)
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
@@ -121,8 +139,6 @@ class State:
                 usage_reported INTEGER NOT NULL DEFAULT 0,
                 model TEXT,
                 model_source TEXT,
-                candidate_id INTEGER,
-                note_id TEXT,
                 diagnostics TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS hook_events (
@@ -136,6 +152,10 @@ class State:
                 target TEXT NOT NULL,
                 touched_at REAL NOT NULL,
                 PRIMARY KEY(scope, target)
+            );
+            CREATE TABLE IF NOT EXISTS transcript_retries (
+                session_id TEXT PRIMARY KEY,
+                last_failure REAL NOT NULL
             );
         """)
         with self._transaction():
@@ -179,13 +199,14 @@ class State:
                 ("interactions", "ready_at", "REAL NOT NULL DEFAULT 0"),
                 ("notifications", "created_at", "REAL NOT NULL DEFAULT 0"),
                 ("candidates", "assistant_claim", "INTEGER NOT NULL DEFAULT 0"),
+                ("candidates", "checkpoint", "TEXT NOT NULL DEFAULT '{}'"),
                 ("checks", "model_called", "INTEGER NOT NULL DEFAULT 0"),
                 ("checks", "usage_reported", "INTEGER NOT NULL DEFAULT 0"),
                 ("checks", "model", "TEXT"),
                 ("checks", "model_source", "TEXT"),
+                ("checks", "diagnostics", "TEXT NOT NULL DEFAULT '{}'"),
                 ("checks", "candidate_id", "INTEGER"),
                 ("checks", "note_id", "TEXT"),
-                ("checks", "diagnostics", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 columns = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
                 if not any(column["name"] == name for column in columns):
@@ -209,12 +230,13 @@ class State:
     def close(self) -> None:
         self.connection.close()
 
-    def observe(self, session_id: str, is_tool: bool) -> Session:
+    def observe(self, session_id: str, is_tool: bool, cwd: str = "") -> Session:
         with self.connection:
             self.connection.execute(
-                "INSERT INTO sessions(session_id, touched_at) VALUES (?, ?) "
-                "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at",
-                (session_id, time.time()),
+                "INSERT INTO sessions(session_id, touched_at, cwd) VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at, "
+                "cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END",
+                (session_id, time.time(), _canonical_cwd(cwd)),
             )
             if is_tool:
                 self.connection.execute(
@@ -224,7 +246,10 @@ class State:
 
     def session(self, session_id: str) -> Session:
         row = self.connection.execute(
-            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            "SELECT sessions.*, coalesce(transcript_retries.last_failure, 0) "
+            "AS last_transcript_failure FROM sessions LEFT JOIN transcript_retries "
+            "USING (session_id) WHERE sessions.session_id = ?",
+            (session_id,),
         ).fetchone()
         if row is None:
             raise ValueError("Unknown session")
@@ -250,6 +275,17 @@ class State:
                     session_id,
                 ),
             )
+            if failed:
+                self.connection.execute(
+                    "INSERT INTO transcript_retries(session_id, last_failure) "
+                    "SELECT session_id, ? FROM sessions WHERE session_id = ? "
+                    "ON CONFLICT(session_id) DO UPDATE SET last_failure = excluded.last_failure",
+                    (time.time(), session_id),
+                )
+            else:
+                self.connection.execute(
+                    "DELETE FROM transcript_retries WHERE session_id = ?", (session_id,)
+                )
 
     def begin(self, session_id: str, now: float) -> None:
         with self.connection:
@@ -328,14 +364,15 @@ class State:
         status: str = "pending",
         reason: str = "",
         assistant_claim: bool = False,
+        checkpoint: dict[str, str] | None = None,
     ) -> int:
         if status not in {"pending", "suppressed"}:
             raise ValueError("Invalid initial candidate status")
         with self.connection:
             cursor = self.connection.execute(
                 "INSERT INTO candidates(session_id, topic, summary, explanation, evidence, "
-                "transcript, offset, status, reason, created_at, touched_at, assistant_claim) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "transcript, offset, status, reason, created_at, touched_at, assistant_claim, "
+                "checkpoint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     finding.topic,
@@ -349,6 +386,7 @@ class State:
                     now,
                     now,
                     assistant_claim,
+                    json.dumps(checkpoint or {}),
                 ),
             )
         assert cursor.lastrowid is not None
@@ -386,9 +424,9 @@ class State:
         model_called: bool = False,
         model: str | None = None,
         model_source: str | None = None,
+        diagnostics: dict[str, Any] | None = None,
         candidate_id: int | None = None,
         note_id: str | None = None,
-        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         model_called = model_called or bool(usage)
         usage = usage or {}
@@ -397,8 +435,9 @@ class State:
             self.connection.execute(
                 "INSERT INTO checks(session_id, event, outcome, phase, reason, created_at, "
                 "latency, input_tokens, cached_input_tokens, output_tokens, "
-                "model_called, usage_reported, model, model_source, candidate_id, note_id, "
-                "diagnostics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "model_called, usage_reported, model, model_source, diagnostics, "
+                "candidate_id, note_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     event,
@@ -414,9 +453,9 @@ class State:
                     usage_reported,
                     model if model_called else None,
                     model_source if model_called else None,
+                    json.dumps(diagnostics or {}),
                     candidate_id,
                     note_id,
-                    json.dumps(diagnostics or {}),
                 ),
             )
 
@@ -427,7 +466,7 @@ class State:
                 "INSERT INTO sessions(session_id, touched_at, cwd) VALUES (?, ?, ?) "
                 "ON CONFLICT(session_id) DO UPDATE SET touched_at = excluded.touched_at, "
                 "cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END",
-                (session_id, now, cwd),
+                (session_id, now, _canonical_cwd(cwd)),
             )
             self.connection.execute(
                 "INSERT INTO hook_events(session_id, event, seen_at) VALUES (?, ?, ?) "
@@ -675,138 +714,76 @@ class State:
             return result
 
     @staticmethod
-    def _cwd_paths(cwd: str) -> list[str]:
-        raw = cwd.strip() or "."
-        resolved = str(Path(raw).expanduser().resolve())
-        return list(dict.fromkeys([raw, resolved]))
-
-    def _session_ids(self, cwd: str | None) -> list[str] | None:
+    def _cwd_filter(cwd: str | None) -> tuple[str, tuple[str, ...]]:
         if cwd is None:
-            return None
-        paths = self._cwd_paths(cwd)
-        rows = self.connection.execute(
-            f"SELECT session_id FROM sessions WHERE cwd IN ({','.join('?' * len(paths))})",
-            paths,
+            return "1", ()
+        return (
+            "session_id IN (SELECT session_id FROM sessions "
+            "WHERE canonical_cwd(cwd) = ? AND cwd != '')",
+            (_canonical_cwd(cwd or "."),),
         )
-        return [row["session_id"] for row in rows]
-
-    @staticmethod
-    def _session_predicate(column: str, session_ids: list[str] | None) -> tuple[str, list[str]]:
-        if session_ids is None:
-            return "1", []
-        if not session_ids:
-            return "0", []
-        placeholders = ",".join("?" * len(session_ids))
-        return f"{column} IN ({placeholders})", list(session_ids)
-
-    def _cwd_join(self, table: str, cwd: str | None) -> tuple[str, str, list[str]]:
-        join = f"LEFT JOIN sessions ON sessions.session_id = {table}.session_id"
-        if cwd is None:
-            return join, "", []
-        join = f"JOIN sessions ON sessions.session_id = {table}.session_id"
-        paths = self._cwd_paths(cwd)
-        return join, f"sessions.cwd IN ({','.join('?' * len(paths))})", paths
-
-    @staticmethod
-    def _compact_candidate(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "id": row["id"],
-            "session_id": row["session_id"],
-            "cwd": row["cwd"] or "",
-            "status": row["status"],
-            "reason": row["reason"],
-            "topic": row["topic"],
-            "summary": row["summary"],
-            "created_at": row["created_at"],
-            "touched_at": row["touched_at"],
-        }
-
-    def _lookup(self, table: str, identifiers: list[Any]) -> dict[Any, sqlite3.Row]:
-        unique = list(dict.fromkeys(identifier for identifier in identifiers if identifier))
-        if not unique:
-            return {}
-        placeholders = ",".join("?" * len(unique))
-        return {
-            row["id"]: row
-            for row in self.connection.execute(
-                f"SELECT * FROM {table} WHERE id IN ({placeholders})", unique
-            )
-        }
-
-    def _hydrate_checks(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
-        checks = []
-        for row in rows:
-            item = dict(row)
-            item["model_called"] = bool(item["model_called"])
-            item["usage_reported"] = bool(item["usage_reported"])
-            item["cwd"] = item.get("cwd") or ""
-            raw_diagnostics = item.get("diagnostics") or "{}"
-            item["diagnostics"] = (
-                json.loads(raw_diagnostics) if isinstance(raw_diagnostics, str) else raw_diagnostics
-            )
-            checks.append(item)
-        candidates = self._lookup("candidates", [item.get("candidate_id") for item in checks])
-        notes = self._lookup("notes", [item.get("note_id") for item in checks])
-        for item in checks:
-            candidate = candidates.get(item.get("candidate_id"))
-            item["candidate"] = (
-                {
-                    "id": candidate["id"],
-                    "status": candidate["status"],
-                    "reason": candidate["reason"],
-                    "topic": candidate["topic"],
-                    "summary": candidate["summary"],
-                }
-                if candidate is not None
-                else None
-            )
-            note = notes.get(item.get("note_id"))
-            item["note"] = (
-                {
-                    "id": note["id"],
-                    "status": note["status"],
-                    "topic": note["topic"],
-                    "summary": note["summary"],
-                }
-                if note is not None
-                else None
-            )
-        return checks
 
     def notes(self, all_notes: bool = False, cwd: str | None = None) -> list[dict[str, Any]]:
-        join, cwd_clause, params = self._cwd_join("notes", cwd)
-        conditions = [] if all_notes else ["notes.status = 'new'"]
-        if cwd_clause:
-            conditions.append(cwd_clause)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        scope, params = self._cwd_filter(cwd)
+        condition = "" if all_notes else "AND notes.status = 'new'"
         rows = self.connection.execute(
-            f"SELECT notes.*, sessions.cwd AS cwd FROM notes {join} {where} "
-            "ORDER BY notes.created_at DESC LIMIT 100",
+            "SELECT notes.*, sessions.cwd FROM notes LEFT JOIN sessions USING (session_id) "
+            f"WHERE {scope} {condition} ORDER BY notes.created_at DESC, notes.id DESC LIMIT 100",
             params,
         ).fetchall()
-        result = []
-        for row in rows:
-            item = self._decode(row)
-            item["cwd"] = item.get("cwd") or ""
-            result.append(item)
-        return result
+        return [{**self._decode(row), "cwd": _stored_cwd(row["cwd"])} for row in rows]
 
     def candidates(
         self, cwd: str | None = None, *, all_candidates: bool = False
     ) -> list[dict[str, Any]]:
-        join, cwd_clause, params = self._cwd_join("candidates", cwd)
-        conditions = [] if all_candidates else ["candidates.status = 'pending'"]
-        if cwd_clause:
-            conditions.append(cwd_clause)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        scope, params = self._cwd_filter(cwd)
+        condition = "" if all_candidates else "AND candidates.status = 'pending'"
         rows = self.connection.execute(
             "SELECT candidates.id, candidates.session_id, candidates.status, candidates.reason, "
             "candidates.topic, candidates.summary, candidates.created_at, candidates.touched_at, "
-            f"sessions.cwd AS cwd FROM candidates {join} {where} "
-            "ORDER BY candidates.created_at DESC, candidates.id DESC",
+            "sessions.cwd FROM candidates LEFT JOIN sessions USING (session_id) "
+            f"WHERE {scope} {condition} ORDER BY candidates.created_at DESC, candidates.id DESC",
             params,
         )
-        return [self._compact_candidate(row) for row in rows]
+        return [{**dict(row), "cwd": _stored_cwd(row["cwd"])} for row in rows]
+
+    def _hydrate_checks(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        checks = [
+            {
+                **dict(row),
+                "cwd": _stored_cwd(row["cwd"]),
+                "model_called": bool(row["model_called"]),
+                "usage_reported": bool(row["usage_reported"]),
+                "diagnostics": json.loads(row["diagnostics"]),
+                "candidate": None,
+                "note": None,
+            }
+            for row in rows
+        ]
+        for table, field, extra in (
+            ("candidates", "candidate", ", reason"),
+            ("notes", "note", ""),
+        ):
+            identifiers = list(dict.fromkeys(item[f"{field}_id"] for item in checks))
+            identifiers = [identifier for identifier in identifiers if identifier is not None]
+            if not identifiers:
+                continue
+            placeholders = ",".join("?" for _ in identifiers)
+            related = {
+                row["id"]: dict(row)
+                for row in self.connection.execute(
+                    f"SELECT id, session_id, status, topic, summary{extra} FROM {table} "
+                    f"WHERE id IN ({placeholders})",
+                    identifiers,
+                )
+            }
+            for item in checks:
+                record = related.get(item[f"{field}_id"])
+                if record is not None and record["session_id"] == item["session_id"]:
+                    item[field] = {
+                        key: value for key, value in record.items() if key != "session_id"
+                    }
+        return checks
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
@@ -814,6 +791,8 @@ class State:
         result["evidence"] = json.loads(result["evidence"])
         if "assistant_claim" in result:
             result["assistant_claim"] = bool(result["assistant_claim"])
+        if "checkpoint" in result:
+            result["checkpoint"] = json.loads(result["checkpoint"])
         result.pop("touched_at", None)
         return result
 
@@ -836,60 +815,38 @@ class State:
             self.connection.execute("DELETE FROM reminders WHERE note_id = ?", (identifier,))
 
     def status(self, cwd: str | None = None) -> list[dict[str, Any]]:
-        where, params = self._session_predicate(
-            "cwd", self._cwd_paths(cwd) if cwd is not None else None
-        )
+        scope, params = self._cwd_filter(cwd)
         return [
             {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
             for row in self.connection.execute(
-                f"SELECT * FROM sessions WHERE {where} ORDER BY last_attempt DESC LIMIT 20",
+                f"SELECT * FROM sessions WHERE {scope} ORDER BY last_attempt DESC LIMIT 20",
                 params,
             )
         ]
 
-    def _checks_matching(
-        self, session_ids: list[str] | None, extra: str, *, limit: int = 20
-    ) -> list[dict[str, Any]]:
-        where, params = self._session_predicate("checks.session_id", session_ids)
-        rows = self.connection.execute(
-            "SELECT checks.*, sessions.cwd AS cwd FROM checks "
-            "LEFT JOIN sessions ON sessions.session_id = checks.session_id "
-            f"WHERE ({where}) AND ({extra}) ORDER BY checks.id DESC LIMIT ?",
-            [*params, limit],
-        ).fetchall()
-        return self._hydrate_checks(rows)
-
-    def _unreviewable_sessions(self, session_ids: list[str] | None) -> list[dict[str, Any]]:
-        where, params = self._session_predicate("session_id", session_ids)
-        return [
-            {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
-            for row in self.connection.execute(
-                "SELECT * FROM sessions WHERE consecutive_transcript_failures >= ? "
-                f"AND ({where}) ORDER BY consecutive_transcript_failures DESC, "
-                "touched_at DESC, session_id",
-                (_TRANSCRIPT_FAILURE_THRESHOLD, *params),
-            )
-        ]
-
     def diagnostics(
-        self,
-        check_limit: int = 20,
-        include_skipped: bool = False,
-        cwd: str | None = None,
+        self, cwd: str | None = None, *, limit: int = 20, include_skipped: bool = False
     ) -> dict[str, Any]:
-        check_limit = max(1, int(check_limit))
-        session_ids = self._session_ids(cwd)
-        candidate_where, candidate_params = self._session_predicate("session_id", session_ids)
-        check_where, check_params = self._session_predicate("session_id", session_ids)
-        hook_where, hook_params = self._session_predicate("session_id", session_ids)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("History limit must be a positive integer")
+        scope, params = self._cwd_filter(cwd)
+
+        def recent_checks(condition: str = "1") -> list[dict[str, Any]]:
+            rows = self.connection.execute(
+                "SELECT checks.*, sessions.cwd FROM checks LEFT JOIN sessions USING (session_id) "
+                f"WHERE {scope} AND {condition} ORDER BY checks.id DESC LIMIT ?",
+                (*params, min(limit, 2**63 - 1)),
+            ).fetchall()
+            return self._hydrate_checks(rows)
+
         counts = {"pending": 0, "confirmed": 0, "suppressed": 0, "withdrawn": 0}
         counts.update(
             {
                 row["status"]: row["total"]
                 for row in self.connection.execute(
                     "SELECT status, count(*) AS total FROM candidates "
-                    f"WHERE {candidate_where} GROUP BY status",
-                    candidate_params,
+                    f"WHERE {scope} GROUP BY status",
+                    params,
                 )
             }
         )
@@ -897,9 +854,8 @@ class State:
             dict(row)
             for row in self.connection.execute(
                 "SELECT status, reason, count(*) AS total FROM candidates "
-                f"WHERE {candidate_where} AND reason != '' "
-                "GROUP BY status, reason ORDER BY total DESC",
-                candidate_params,
+                f"WHERE {scope} AND reason != '' GROUP BY status, reason ORDER BY total DESC",
+                params,
             )
         ]
         totals = dict(
@@ -913,14 +869,13 @@ class State:
                 "coalesce(sum(output_tokens), 0) AS output_tokens, "
                 "coalesce(sum(model_called), 0) AS model_calls, "
                 "coalesce(sum(model_called AND NOT usage_reported), 0) AS usage_unknown_calls "
-                f"FROM checks WHERE {check_where}",
-                check_params,
+                f"FROM checks WHERE {scope}",
+                params,
             ).fetchone()
         )
         hooks: dict[str, dict[str, float]] = {}
         for row in self.connection.execute(
-            f"SELECT * FROM hook_events WHERE {hook_where} ORDER BY session_id, event",
-            hook_params,
+            f"SELECT * FROM hook_events WHERE {scope} ORDER BY session_id, event", params
         ):
             hooks.setdefault(row["session_id"], {})[row["event"]] = row["seen_at"]
         warnings = []
@@ -939,39 +894,27 @@ class State:
                         f"the {event} hook may be untrusted or has not run yet",
                     }
                 )
-        recent_where, recent_params_list = self._session_predicate("checks.session_id", session_ids)
-        if not include_skipped:
-            recent_where = f"({recent_where}) AND checks.outcome != 'skipped'"
-        recent_rows = self.connection.execute(
-            "SELECT checks.*, sessions.cwd AS cwd FROM checks "
-            "LEFT JOIN sessions ON sessions.session_id = checks.session_id "
-            f"WHERE {recent_where} ORDER BY checks.id DESC LIMIT ?",
-            [*recent_params_list, check_limit],
-        ).fetchall()
-        mute_where, mute_params = "1", []
-        if cwd is not None:
-            session_where, session_params = self._session_predicate("target", session_ids)
-            project_where, project_params = self._session_predicate("target", self._cwd_paths(cwd))
-            mute_where = (
-                f"(scope = 'session' AND {session_where}) "
-                f"OR (scope = 'project' AND {project_where})"
-            )
-            mute_params = [*session_params, *project_params]
         return {
             "candidates": counts,
             "candidate_reasons": reasons,
-            "recent_checks": self._hydrate_checks(recent_rows),
-            "recent_transcript_errors": self._checks_matching(
-                session_ids,
-                "json_array_length(diagnostics, '$.transcript_errors') > 0",
+            "recent_checks": recent_checks("1" if include_skipped else "outcome != 'skipped'"),
+            "recent_transcript_errors": recent_checks(
+                "json_array_length(diagnostics, '$.transcript_errors') > 0"
             ),
-            "recent_evidence_rejections": self._checks_matching(
-                session_ids,
+            "recent_evidence_rejections": recent_checks(
                 "json_type(diagnostics, '$.evidence_rejection') = 'object' "
-                "AND json_extract(diagnostics, '$.evidence_rejection') != '{}'",
+                "AND json_extract(diagnostics, '$.evidence_rejection') != '{}'"
             ),
             "transcript_failure_threshold": _TRANSCRIPT_FAILURE_THRESHOLD,
-            "unreviewable_sessions": self._unreviewable_sessions(session_ids),
+            "unreviewable_sessions": [
+                {**dict(row), "unknown_record_types": json.loads(row["unknown_record_types"])}
+                for row in self.connection.execute(
+                    f"SELECT * FROM sessions WHERE {scope} "
+                    "AND consecutive_transcript_failures >= ? "
+                    "ORDER BY consecutive_transcript_failures DESC, touched_at DESC, session_id",
+                    (*params, _TRANSCRIPT_FAILURE_THRESHOLD),
+                )
+            ],
             **totals,
             "model_usage": [
                 dict(row)
@@ -982,10 +925,9 @@ class State:
                     "sum(cached_input_tokens) AS cached_input_tokens, "
                     "sum(output_tokens) AS output_tokens, "
                     "sum(NOT usage_reported) AS usage_unknown_calls "
-                    f"FROM checks WHERE model_called = 1 AND ({check_where}) "
-                    "GROUP BY model, model_source "
+                    f"FROM checks WHERE {scope} AND model_called = 1 GROUP BY model, model_source "
                     "ORDER BY model_calls DESC, model, model_source",
-                    check_params,
+                    params,
                 )
             ],
             "hooks": hooks,
@@ -993,7 +935,13 @@ class State:
             "mutes": [
                 dict(row)
                 for row in self.connection.execute(
-                    f"SELECT * FROM mutes WHERE {mute_where}", mute_params
+                    "SELECT * FROM mutes"
+                    if cwd is None
+                    else "SELECT * FROM mutes WHERE "
+                    "(scope = 'project' AND canonical_cwd(target) = ?) OR "
+                    "(scope = 'session' AND target IN (SELECT session_id FROM sessions "
+                    "WHERE canonical_cwd(cwd) = ? AND cwd != ''))",
+                    () if cwd is None else (*params, *params),
                 )
             ],
         }
@@ -1021,6 +969,10 @@ class State:
                         f"DELETE FROM {table} WHERE created_at < ?", (cutoff,)
                     )
                     removed[table] = cursor.rowcount
+                removed["transcript_retries"] = self.connection.execute(
+                    "DELETE FROM transcript_retries WHERE session_id NOT IN "
+                    "(SELECT session_id FROM sessions)"
+                ).rowcount
                 removed["hook_events"] = self.connection.execute(
                     "DELETE FROM hook_events WHERE seen_at < ?", (cutoff,)
                 ).rowcount

@@ -28,28 +28,29 @@ Use the command that matches the request:
 | Request | CLI arguments |
 | --- | --- |
 | Show open notes and pending candidates | `notes` |
-| Include known and dismissed notes and all candidate history | `notes --all` |
-| Limit notes and candidates to a working directory | `notes --cwd PATH` |
+| Include known and dismissed notes and candidate history | `notes --all` |
+| Inspect notes and candidates for one working directory | `notes --cwd PATH` |
 | Explain a note | `show ID` |
 | Mark a note as already known | `know ID` |
 | Dismiss a note | `dismiss ID` |
-| Inspect configuration and executed check status | `status` |
-| Show more executed checks | `status --limit N` |
-| Include skipped cadence and cooldown checks | `status --skipped` |
-| Limit status to a working directory | `status --cwd PATH` |
+| Inspect configuration and check status | `status` |
+| Inspect check status for one working directory | `status --cwd PATH` |
+| Include skipped checks or more recent history | `status --skipped --limit N` |
 | Check a specified transcript now | `check --transcript PATH --session SESSION` |
 
 Use the note identifier returned by the CLI. When explaining a note, distinguish its supporting transcript evidence from the reviewer's inference. A note is advisory; it does not authorize a code change or a new investigation.
 
-Potential findings remain unconfirmed candidates until a separate review checks subsequent work and disclosure. `notes` lists open notes and pending candidates in compact form, including candidates that never received a later confirmation. `notes --all` also includes confirmed, suppressed, and withdrawn candidates. `status` reports pending, suppressed, and withdrawn candidate counts and reasons, recent executed check outcomes, reported token usage, errors, latency, and hook sightings. `recent_checks` omits skipped cadence and cooldown attempts unless `--skipped` is passed; executed rows include linked candidate or note topic and summary when those were recorded. An unconfirmed candidate is not a verified note. The default budget is 30 model calls per session per rolling hour, including confirmations; an explicit legacy lifetime limit still applies. Inactive state expires after 30 days by default.
+Findings remain candidates until a separate confirmation checks subsequent work and disclosure. Automatic alerts show only confirmed notes. The `notes` response contains separate `notes` and `candidates` lists; candidates are compact summaries without stored transcripts or evidence. The default candidate list shows only pending findings; `notes --all` includes confirmed, suppressed, and withdrawn history. A candidate is not a verified note. Its numeric ID cannot be used with `show`, `know`, or `dismiss`. Do not present pending or withdrawn concerns as established defects.
 
-`recent_checks` records the requested model ID and its source (`config`, `hook`, or `argument`) for model calls. `model_usage` groups calls and tokens by model and source. A `cli_default` source with a null model means the reviewer CLI chose without reporting its model; null model metadata in older records is unknown. Do not infer those model IDs from the current chat or configuration. Review and confirmation can use different models if the chat's selection changes between checks. Optional `review_instructions` adds focus to initial reviews without replacing evidence or confirmation requirements.
+`status` reports candidate counts and reasons, recent outcomes, reported token usage, errors, latency, and hook sightings. `recent_checks` omits skipped checks by default; `--skipped` includes them, and totals always count them. `--limit N` is a positive integer controlling each recent-check list, defaulting to 20; it does not limit aggregates. Linked candidate and note summaries reflect their current retained state, while each check's outcome and reason describe that check. Null links in older records are unknown, and expired objects have null summaries.
 
-With a pending candidate, the next eligible review confirms that candidate instead of looking for another concern. Confirmation judges the conversation supplied to it. New messages or tool activity during the call neither invalidate an approved result nor trigger an extra confirmation. A note can occasionally arrive after its cause has been resolved. Published notes are not automatically reassessed or marked resolved; later reviews receive their summaries to avoid repetition. A historical withdrawal with reason `Conversation advanced during confirmation` came from the older rule that discarded the candidate on any new visible activity, without assessing that activity's relevance.
+Use `--cwd PATH` when the user requests one project's notes or diagnostics. Matching uses the session's latest recorded working directory with relative paths and symlinks resolved, not a repository-wide subtree. Records with no known session directory remain available only in unfiltered output. The filter applies to all diagnostic lists and aggregates; configuration is global. Manual checks record the invoking working directory for their supplied session. The default budget remains 30 model calls per session per rolling hour, including confirmations; an explicit legacy lifetime limit still applies. Inactive state expires after 30 days by default.
 
 `recent_checks` records the requested model ID and its source (`config`, `hook`, or `argument`) for model calls. `model_usage` groups calls, errors, tokens, and calls with unknown usage by model and source. A `cli_default` source with a null model means the reviewer CLI selected an unreported model. Null model metadata in older records is unknown. Do not infer those model IDs from the current chat or configuration. Review and confirmation can use different models if the chat's selection changes between checks. The plugin's configured model takes precedence over hook models and manual `--model` arguments.
 
 Completed-turn reviews bypass the background cooldown while retaining call budgets and unchanged-excerpt detection. Setting `final_check = false` still disables those reviews and confirmations. Optional `review_instructions` adds up to 8,000 characters of focus to initial reviews; evidence validation and separate confirmation still apply.
+
+With a pending candidate, the next eligible review confirms that candidate instead of looking for another concern. Confirmation judges the conversation supplied to it. New messages or tool activity during the call neither invalidate an approved result nor trigger an extra confirmation. A note can occasionally arrive after its cause has been resolved. Published notes are not automatically reassessed or marked resolved; later reviews receive their summaries to avoid repetition. A historical withdrawal with reason `Conversation advanced during confirmation` came from the older rule that discarded the candidate on any new visible activity, without assessing that activity's relevance. Transcript checkpoints still guard against replaced or rewritten conversation history; an invalid checkpoint withdraws the stale candidate and restarts review.
 
 Run `know` or `dismiss` when the user requests that disposition. Reading notes does not change their status. If the user asks for a manual check, use the requested transcript and session. Manual checks consume Codex model usage and can make two calls when a candidate needs confirmation. Do not guess a transcript path or scan unrelated sessions.
 

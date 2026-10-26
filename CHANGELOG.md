@@ -4,10 +4,9 @@
 
 ### Added
 
-- Added optional shortcut setup through a bundled skill and `shortcuts install`. Press Alt+Y, release the keys, then 1–4 to submit `ysk 1` through `ysk 4` using Codex CLI presets. Existing note-menu stages and reply windows still apply.
-- Added `shortcuts remove` to delete only unchanged settings installed by the helper. Setup preserves existing configuration and comments, reports conflicts without writing, and leaves matching pre-existing settings unowned. Neither command accesses the notes database or calls the reviewer; hook definitions are unchanged.
-- Added `notes --cwd` and `status --cwd` to limit listings to one working directory, and included a compact list of pending candidates (status, reason, topic, summary, timestamps, directory) in `notes` so pending findings remain visible if their session is not resumed. `notes --all` includes confirmed, suppressed, and withdrawn candidate history.
-- Added `status --limit` and `status --skipped`. `recent_checks` now defaults to executed checks and includes linked candidate or note topic and summary when those were recorded. Cadence and cooldown skips are available with `--skipped`.
+- Add `notes --cwd` and `status --cwd` to inspect one session working directory, including scoped check history, totals, model usage, transcript diagnostics, hook sightings, warnings, and mutes.
+- Show compact pending candidates alongside published notes. `notes --all` includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit stored transcripts and evidence and do not trigger reviewer calls.
+- Add `status --limit` and `status --skipped`. Recent check history hides skipped checks by default while totals retain them. New check records link to compact candidate and note summaries; legacy associations remain unknown.
 - Added `scripts/dev_update.py` to merge tracked upstream changes, preserve local edits, run validation, build a versioned development bundle, and switch an existing GitHub or local installation to that bundle. Installation failures attempt restoration from a local backup; running standalone Codex CLI sessions prevent replacement of their hook files. Persistent app-server and code-mode-host services do not block updates.
 
 ### Changed
@@ -18,6 +17,20 @@
 ### Fixed
 
 - Accept a valid confirmation against the conversation supplied to the reviewer. New messages or tool activity during the model call no longer withdraw an approved candidate or trigger extra confirmations. A failed transcript read after confirmation starts still prevents publication. A note can occasionally arrive after its cause has been resolved; published notes are not automatically reassessed by later reviews.
+
+## [0.3.3] - 2026-10-26
+
+### Fixed
+
+- Validate saved transcript cursors against the source path and a hash of the complete reviewed prefix. If the transcript changes or an older candidate lacks a checkpoint, withdraw that candidate and review the current conversation again. Recheck continuity before publishing a confirmed note.
+- Apply the configured background retry interval after transcript-read failures without spending model-call budget. End-of-turn and explicit manual checks still bypass that interval.
+- Keep retry timestamps separate from session rows so hooks from 0.3.2 can continue using the shared database during an upgrade.
+- Match reviewer output schemas to the existing text-length and evidence-count limits. Clarify that evidence must preserve literal backslashes already present in source text, while escaping the response JSON correctly. Exact evidence and source validation remain unchanged.
+
+### Added
+
+- Added optional shortcut setup through a bundled skill and `shortcuts install`. Press Alt+Y, release the keys, then 1–4 to submit `ysk 1` through `ysk 4` using Codex CLI presets. Existing note-menu stages and reply windows still apply.
+- Added `shortcuts remove` to delete only unchanged settings installed by the helper. Setup preserves existing configuration and comments, reports conflicts without writing, and leaves matching pre-existing settings unowned. Neither command accesses the notes database or calls the reviewer; hook definitions are unchanged.
 
 ## [0.3.2] - 2026-10-25
 
@@ -176,7 +189,8 @@ Initial public version.
 - Added persistent notes, known and dismissed topic tracking, configurable review cadence, and manual checks through a bundled skill and CLI.
 - Named the review hooks in Codex's trust interface.
 
-[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/iliaal/codex-you-should-know/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/iliaal/codex-you-should-know/compare/v0.2.6...v0.3.0
