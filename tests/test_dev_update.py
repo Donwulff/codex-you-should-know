@@ -171,12 +171,13 @@ def test_modified_existing_bundle_is_not_replaced(source):
 
 class FakeCodex:
     def __init__(self, root, source):
-        self.home = root / "fake codex home"
         self.marketplace = {"name": updater.NAME, "root": str(root / "published marketplace")}
         shutil.copytree(source, self.marketplace["root"])
         installed_version = json.loads(
             (Path(self.marketplace["root"]) / ".codex-plugin/plugin.json").read_text()
         )["version"]
+        self.cache = updater.codex_home() / "plugins/cache" / updater.NAME / updater.NAME
+        shutil.copytree(source, self.cache / installed_version)
         self.plugins = [
             {
                 "name": updater.NAME,
@@ -188,8 +189,6 @@ class FakeCodex:
         ]
         self.calls = []
         self.fail_next_add = False
-        cache = self.home / "plugins/cache" / updater.NAME / updater.NAME / installed_version
-        shutil.copytree(source, cache)
 
     def __call__(self, root, *args):
         self.calls.append(args)
@@ -199,7 +198,7 @@ class FakeCodex:
             return {"marketplaces": [self.marketplace] if self.marketplace else []}
         if args[0] == "remove":
             self.plugins = []
-            shutil.rmtree(self.home / "plugins/cache" / updater.NAME, ignore_errors=True)
+            shutil.rmtree(self.cache)
         elif args[:2] == ("marketplace", "remove"):
             self.marketplace = None
         elif args[:2] == ("marketplace", "add"):
@@ -211,12 +210,13 @@ class FakeCodex:
                 raise updater.UpdateError("simulated installation failure")
             assert self.marketplace is not None
             marketplace = Path(self.marketplace["root"])
-            catalog = json.loads((marketplace / ".agents/plugins/marketplace.json").read_text())
-            package = marketplace / catalog["plugins"][0]["source"]["path"]
-            manifest = package / ".codex-plugin/plugin.json"
+            entry = json.loads((marketplace / ".agents/plugins/marketplace.json").read_text())[
+                "plugins"
+            ][0]
+            source = marketplace / entry["source"]["path"]
+            manifest = source / ".codex-plugin/plugin.json"
             version = json.loads(manifest.read_text())["version"]
-            cache = self.home / "plugins/cache" / updater.NAME / updater.NAME / version
-            shutil.copytree(package, cache)
+            shutil.copytree(source, self.cache / version)
             self.plugins = [
                 {
                     "name": updater.NAME,
@@ -233,10 +233,16 @@ class FakeCodex:
 
 @pytest.fixture
 def installation(source, tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex home"))
     fake = FakeCodex(tmp_path, source)
-    monkeypatch.setenv("CODEX_HOME", str(fake.home))
     monkeypatch.setattr(updater, "codex", fake)
     monkeypatch.setattr(updater, "require_closed_codex", lambda root: None)
+
+    def set_enabled(root, plugin_id, enabled):
+        assert fake.plugins[0]["pluginId"] == plugin_id
+        fake.plugins[0]["enabled"] = enabled
+
+    monkeypatch.setattr(updater, "set_plugin_enabled", set_enabled)
     return source, fake
 
 
@@ -256,7 +262,7 @@ def test_published_install_switches_to_local_and_repeated_install_is_unchanged(i
     fake.calls.clear()
     updater.install(root, bundle)
     assert not [c for c in fake.calls if "add" in c or "remove" in c]
-    assert not list((root / ".scratch").glob("dev-update-backup-*"))
+    assert not list((updater.codex_home() / "plugin-update-backups").iterdir())
 
 
 def test_failed_install_restores_previous_files_without_network(installation):
@@ -275,40 +281,99 @@ def test_failed_install_restores_previous_files_without_network(installation):
     assert backup != bundle
 
 
-@pytest.mark.parametrize("ancestor", [False, True])
-def test_checkout_marketplace_backup_does_not_copy_into_itself(installation, monkeypatch, ancestor):
+@pytest.mark.parametrize("installed", [False, True])
+def test_checkout_marketplace_backup_does_not_copy_into_itself(installation, installed):
     root, fake = installation
-    fake.marketplace["root"] = str(root.parent if ancestor else root)
-    fake.plugins = []
+    fake.marketplace["root"] = str(root)
+    if not installed:
+        fake.plugins = []
+        shutil.rmtree(fake.cache)
     bundle = updater.build(root)
-    original = shutil.copytree
-    destinations = []
-
-    def bounded_copy(source, destination, *args, **kwargs):
-        if not destinations:
-            destinations.append(Path(destination))
-        assert Path(source) != destinations[0], "Backup entered its own destination"
-        return original(source, destination, *args, **kwargs)
-
-    monkeypatch.setattr(shutil, "copytree", bounded_copy)
-    updater.install(root, bundle)
-    assert fake.plugins[0]["version"] == bundle.name
+    fake.fail_next_add = True
+    with pytest.raises(updater.UpdateError, match="restoration details"):
+        updater.install(root, bundle)
+    backup = Path(fake.marketplace["root"])
+    assert not backup.is_relative_to(root)
+    assert len(fake.plugins) == int(installed)
+    assert (backup / ("plugin/README.md" if installed else "README.md")).exists()
+    assert not list(root.rglob("plugin-update-backups"))
 
 
-@pytest.mark.parametrize("failure", ["missing", "mismatched"])
-def test_unverifiable_installed_package_stops_before_removing_plugin(installation, failure):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_rollback_restores_cached_content_version_and_enablement(installation, enabled):
     root, fake = installation
-    installed = updater.installed_package(fake.plugins[0])
-    manifest = installed / ".codex-plugin/plugin.json"
-    if failure == "missing":
-        manifest.unlink()
-    else:
-        data = json.loads(manifest.read_text())
-        data["version"] = "9.0.0"
-        manifest.write_text(json.dumps(data))
-    with pytest.raises(updater.UpdateError, match="installed YSK package|does not match"):
+    fake.plugins[0]["enabled"] = enabled
+    original = fake.plugins[0].copy()
+    cache = updater.installed_files(original)
+    expected = updater.file_hashes(cache)
+    marketplace = Path(fake.marketplace["root"])
+    manifest = marketplace / ".codex-plugin/plugin.json"
+    data = json.loads(manifest.read_text())
+    data["version"] = "99.0.0"
+    manifest.write_text(json.dumps(data))
+    (marketplace / "src/you_should_know/config.py").write_text("# newer marketplace code\n")
+    fake.fail_next_add = True
+    with pytest.raises(updater.UpdateError, match="restoration details"):
         updater.install(root, updater.build(root))
-    assert fake.plugins[0]["enabled"] is True
+    assert fake.plugins == [original]
+    assert updater.file_hashes(updater.installed_files(original)) == expected
+
+
+def test_missing_installed_cache_stops_before_removing_plugin(installation):
+    root, fake = installation
+    shutil.rmtree(fake.cache)
+    with pytest.raises(FileNotFoundError):
+        updater.install(root, updater.build(root))
+    assert not [c for c in fake.calls if "add" in c or "remove" in c]
+
+
+def test_backup_rejects_overlapping_profile_before_copying(installation):
+    root, fake = installation
+    fake.plugins = []
+    fake.marketplace["root"] = str(updater.codex_home().parent)
+    with pytest.raises(updater.UpdateError, match="overlaps"):
+        updater.install(root, updater.build(root))
+    assert not [c for c in fake.calls if "add" in c or "remove" in c]
+
+
+@pytest.mark.parametrize("incorrect", ["enablement", "files"])
+def test_incorrect_restoration_is_reported_and_keeps_backup(
+    installation, monkeypatch, capsys, incorrect
+):
+    root, fake = installation
+    fake.plugins[0]["enabled"] = False
+
+    def incorrect_restore(root, plugin_id, enabled):
+        if incorrect == "files":
+            fake.plugins[0]["enabled"] = enabled
+            cache = updater.installed_files(fake.plugins[0])
+            (cache / "src/you_should_know/config.py").write_text("# incorrect restored files\n")
+
+    monkeypatch.setattr(updater, "set_plugin_enabled", incorrect_restore)
+    fake.fail_next_add = True
+    with pytest.raises(updater.UpdateError, match="restoration details"):
+        updater.install(root, updater.build(root))
+    message = capsys.readouterr().err
+    assert "Automatic restoration failed" in message
+    assert "Restored the previous files" not in message
+    assert (Path(fake.marketplace["root"]).parent / "previous.json").exists()
+
+
+def test_failed_backup_is_cleaned_up_without_changing_installation(installation, monkeypatch):
+    root, fake = installation
+    bundle = updater.build(root)
+    original = fake.plugins[0].copy()
+
+    def failed_copy(source, destination, **kwargs):
+        destination.mkdir(parents=True)
+        (destination / "partial-file").write_text("incomplete backup")
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(updater.shutil, "copytree", failed_copy)
+    with pytest.raises(OSError, match="copy failed"):
+        updater.install(root, bundle)
+    assert fake.plugins == [original]
+    assert not list((updater.codex_home() / "plugin-update-backups").iterdir())
     assert not [c for c in fake.calls if "add" in c or "remove" in c]
 
 
@@ -475,7 +540,7 @@ def test_native_codex_switches_marketplaces_and_installs_changed_development_ver
         updater.install(source, third)
     restored, registered = updater.inventory(source)
     assert restored[0]["version"] == second.name
-    assert registered and (Path(registered["root"]) / ".agents/plugins/marketplace.json").exists()
+    assert registered and (Path(registered["root"]) / "plugin/.codex-plugin/plugin.json").exists()
     assert (data / "config.toml").read_text() == 'review_instructions = "Keep this."\n'
     assert (data / "state.sqlite3").read_bytes() == b"existing notes are not read or modified"
 
@@ -484,59 +549,48 @@ def test_native_codex_switches_marketplaces_and_installs_changed_development_ver
     os.environ.get("YSK_TEST_NATIVE_CODEX") != "1" or not shutil.which("codex"),
     reason="Set YSK_TEST_NATIVE_CODEX=1 for installation in an isolated Codex profile",
 )
-@pytest.mark.parametrize("change", ["disabled", "marketplace_advanced"])
-def test_native_codex_failed_update_restores_installed_bytes_and_enabled_state(
-    source, tmp_path, monkeypatch, change
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_rollback_from_checkout_restores_installed_files_and_setting(
+    source, tmp_path, monkeypatch, enabled
 ):
-    home = tmp_path / "isolated codex home"
+    home = tmp_path / "isolated home"
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.setattr(updater, "require_closed_codex", lambda root: None)
-    published = tmp_path / "published"
-    shutil.copytree(source, published)
-    updater.codex(source, "marketplace", "add", str(published))
-    added = updater.codex(source, "add", updater.PLUGIN)
-    installed = Path(added["installedPath"])
-    (installed / "installed-only.txt").write_text("Preserve the installed package.\n")
-    expected = {
-        p.relative_to(installed): p.read_bytes() for p in installed.rglob("*") if p.is_file()
-    }
     config = home / "config.toml"
-    config.write_text(
-        config.read_text()
-        + "\n[notice]\n# Preserve this comment\nhide_rate_limit_model_nudge = true\n"
-    )
-    if change == "disabled":
-        config = home / "config.toml"
-        text = config.read_text()
-        assert text.count("enabled = true") == 1
-        config.write_text(text.replace("enabled = true", "enabled = false"))
-    before, _ = updater.inventory(source)
-    previous_settings = tomllib.loads(config.read_text())
-    assert before[0]["enabled"] is (change != "disabled")
-    if change == "marketplace_advanced":
-        manifest = published / ".codex-plugin/plugin.json"
-        data = json.loads(manifest.read_text())
-        data["version"] = "9.0.0"
-        manifest.write_text(json.dumps(data))
-        (published / "src/you_should_know/config.py").write_text("# changed marketplace\n")
+    config.write_text('# Keep this comment.\nmodel = "gpt-6.1-sol"\n')
+    # Register the checkout itself, then advance it without updating the cache.
+    updater.codex(source, "marketplace", "add", str(source))
+    updater.codex(source, "add", updater.PLUGIN)
+    if not enabled:
+        config.write_text(config.read_text().replace("enabled = true", "enabled = false"))
+    original = updater.inventory(source)[0][0]
+    expected = updater.file_hashes(updater.installed_files(original))
+    manifest = source / ".codex-plugin/plugin.json"
+    data = json.loads(manifest.read_text())
+    data["version"] = "99.0.0"
+    manifest.write_text(json.dumps(data))
+    (source / "src/you_should_know/config.py").write_text("# changed source, unchanged cache\n")
     bundle = updater.build(source)
-    original = updater.codex
+    original_codex = updater.codex
     failures = []
 
     def fail_once(root, *args):
         if args == ("add", updater.PLUGIN) and not failures:
             failures.append(True)
             raise updater.UpdateError("simulate a failed install")
-        return original(root, *args)
+        return original_codex(root, *args)
 
     monkeypatch.setattr(updater, "codex", fail_once)
     with pytest.raises(updater.UpdateError, match="restoration details"):
         updater.install(source, bundle)
-    restored, _ = updater.inventory(source)
-    assert restored[0]["version"] == before[0]["version"]
-    assert restored[0]["enabled"] == before[0]["enabled"]
-    actual = {p.relative_to(installed): p.read_bytes() for p in installed.rglob("*") if p.is_file()}
-    assert actual == expected
-    assert tomllib.loads(config.read_text())["notice"] == previous_settings["notice"]
-    assert "# Preserve this comment" in config.read_text()
+    restored, registered = updater.inventory(source)
+    assert len(restored) == 1
+    assert restored[0]["version"] == original["version"]
+    assert restored[0]["enabled"] is enabled
+    assert updater.file_hashes(updater.installed_files(restored[0])) == expected
+    assert registered and not Path(registered["root"]).is_relative_to(source)
+    settings = tomllib.loads(config.read_text())
+    assert settings["plugins"][updater.PLUGIN]["enabled"] is enabled
+    assert settings["model"] == "gpt-6.1-sol"
+    assert "# Keep this comment." in config.read_text()

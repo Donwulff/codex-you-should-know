@@ -18,6 +18,7 @@ from pathlib import Path
 
 NAME = "you-should-know"
 PLUGIN = f"{NAME}@{NAME}"
+BACKUP_IGNORES = (".git", ".venv", "__pycache__")
 
 
 class UpdateError(RuntimeError):
@@ -250,8 +251,6 @@ def inventory(root: Path) -> tuple[list[dict], dict | None]:
             f"The {NAME} marketplace contains other installed plugins; leaving it intact."
         )
     copies = [p for p in plugins if p["name"] == NAME]
-    if len(copies) > 1:
-        raise UpdateError("Codex reported multiple YSK installations; leaving them intact.")
     if any(p["marketplaceName"] != NAME for p in copies):
         raise UpdateError("YSK is also installed from another marketplace; remove that copy first.")
     marketplace = next((m for m in marketplaces if m["name"] == NAME), None)
@@ -262,7 +261,13 @@ def inventory(root: Path) -> tuple[list[dict], dict | None]:
     return copies, marketplace
 
 
-def installed_package(plugin: dict) -> Path:
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser().resolve()
+
+
+def installed_files(plugin: dict) -> Path:
+    # The CLI lists source locations, not installed locations. Validate the
+    # current native cache layout before removing anything; never guess a version.
     version = plugin.get("version")
     if (
         not isinstance(version, str)
@@ -270,63 +275,58 @@ def installed_package(plugin: dict) -> Path:
         or version in {".", ".."}
         or Path(version).name != version
     ):
-        raise UpdateError("Could not identify the installed YSK version; leaving it intact.")
-    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    package = home / "plugins/cache" / NAME / NAME / version
-    try:
-        manifest = json.loads((package / ".codex-plugin/plugin.json").read_text())
-    except (OSError, ValueError) as error:
-        raise UpdateError(f"Cannot back up the installed YSK package: {package}") from error
+        raise UpdateError("Cannot locate the installed plugin version for recovery.")
+    cache = codex_home() / "plugins/cache" / NAME / NAME / version
+    manifest = json.loads((cache / ".codex-plugin/plugin.json").read_text())
     if manifest.get("name") != NAME or manifest.get("version") != version:
-        raise UpdateError(f"Installed YSK package does not match Codex inventory: {package}")
-    return package.resolve()
+        raise UpdateError(f"Installed plugin manifest does not match inventory: {cache}")
+    return cache
 
 
-def package_contents(package: Path) -> dict:
+def file_hashes(directory: Path) -> dict[Path, str]:
     result = {}
-    for path in package.rglob("*"):
-        relative = str(path.relative_to(package))
+    for path in directory.rglob("*"):
+        relative = path.relative_to(directory)
+        if any(part in BACKUP_IGNORES for part in relative.parts):
+            continue
         if path.is_symlink():
-            result[relative] = ("link", os.readlink(path))
-        elif path.is_file():
-            result[relative] = (
-                "file",
-                hashlib.sha256(path.read_bytes()).hexdigest(),
-                path.stat().st_mode & 0o777,
-            )
-        elif path.is_dir():
-            result[relative] = ("directory",)
-        else:
-            raise UpdateError(f"Cannot back up a special file in the installed package: {path}")
+            raise UpdateError(f"Cannot snapshot or verify a plugin containing a symlink: {path}")
+        if path.is_file():
+            result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 
 
-def backup_installation(root: Path, plugins: list[dict], marketplace: dict) -> Path:
-    installed = installed_package(plugins[0]) if plugins else None
-    scratch = root / ".scratch"
-    scratch.mkdir(exist_ok=True)
-    backup = Path(tempfile.mkdtemp(prefix="dev-update-backup-", dir=scratch)).resolve()
-    recovery = backup / "marketplace"
+def backup_installation(plugins: list[dict], marketplace: dict) -> Path:
+    if len(plugins) > 1:
+        raise UpdateError("Cannot safely restore multiple installed YSK versions.")
+    source = installed_files(plugins[0]) if plugins else Path(marketplace["root"])
+    parent = codex_home() / "plugin-update-backups"
+    # Also guard unusual profiles located inside the source being backed up.
+    if parent.resolve().is_relative_to(source.resolve()):
+        raise UpdateError(f"Backup directory overlaps its source: {parent}")
+    parent.mkdir(parents=True, exist_ok=True)
+    backup = Path(tempfile.mkdtemp(prefix="ysk-", dir=parent))
     try:
-        if installed:
-            shutil.copytree(installed, recovery / "plugin", symlinks=True)
-            if package_contents(installed) != package_contents(recovery / "plugin"):
-                raise UpdateError("Installed YSK files changed while backing them up; retry later.")
-            catalog = recovery / ".agents/plugins/marketplace.json"
-            catalog.parent.mkdir(parents=True)
-            catalog.write_text(
+        recovery = backup / "marketplace"
+        if plugins:
+            if not isinstance(plugins[0].get("enabled"), bool):
+                raise UpdateError("Installed plugin enablement is unavailable for recovery.")
+            before = file_hashes(source)
+            shutil.copytree(
+                source, recovery / "plugin", ignore=shutil.ignore_patterns(*BACKUP_IGNORES)
+            )
+            if file_hashes(recovery / "plugin") != before:
+                raise UpdateError("Installed plugin files changed while creating the backup.")
+            # A separate wrapper keeps the cached plugin byte-for-byte intact,
+            # even if the registered marketplace has advanced to a newer version.
+            manifest = recovery / ".agents/plugins/marketplace.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
                 json.dumps(
                     {
                         "name": NAME,
                         "plugins": [
-                            {
-                                "name": NAME,
-                                "source": {"source": "local", "path": "./plugin"},
-                                "policy": {
-                                    "installation": "AVAILABLE",
-                                    "authentication": "ON_INSTALL",
-                                },
-                            }
+                            {"name": NAME, "source": {"source": "local", "path": "./plugin"}}
                         ],
                     },
                     indent=2,
@@ -334,16 +334,12 @@ def backup_installation(root: Path, plugins: list[dict], marketplace: dict) -> P
                 + "\n"
             )
         else:
-
-            def ignore(directory: str, names: list[str]) -> list[str]:
-                return [
-                    name
-                    for name in names
-                    if name in {".git", ".venv", "__pycache__"}
-                    or (Path(directory) / name).resolve() == backup
-                ]
-
-            shutil.copytree(marketplace["root"], recovery, symlinks=True, ignore=ignore)
+            shutil.copytree(
+                source,
+                recovery,
+                symlinks=True,
+                ignore=shutil.ignore_patterns(*BACKUP_IGNORES),
+            )
         (backup / "previous.json").write_text(
             json.dumps({"marketplace": marketplace, "plugins": plugins}, indent=2) + "\n"
         )
@@ -353,20 +349,12 @@ def backup_installation(root: Path, plugins: list[dict], marketplace: dict) -> P
     return backup
 
 
-def set_enabled(root: Path, plugin_id: str, enabled: bool) -> None:
+def set_plugin_enabled(root: Path, plugin_id: str, enabled: bool) -> None:
+    """Use Codex's TOML editor to change only this plugin's enabled setting."""
     with (
         tempfile.TemporaryFile() as errors,
         subprocess.Popen(
-            [
-                "codex",
-                "app-server",
-                "--listen",
-                "stdio://",
-                "--disable",
-                "remote_plugin",
-                "--disable",
-                "apps",
-            ],
+            ["codex", "app-server", "--disable", "remote_plugin", "--disable", "apps"],
             cwd=root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -376,58 +364,42 @@ def set_enabled(root: Path, plugin_id: str, enabled: bool) -> None:
     ):
         assert process.stdin is not None and process.stdout is not None
         selector.register(process.stdout, selectors.EVENT_READ)
-        pending = bytearray()
-        identifier = 0
 
-        def send(message: dict) -> None:
-            assert process.stdin is not None
-            process.stdin.write((json.dumps(message) + "\n").encode())
+        def request(identifier: int, method: str, params: dict) -> None:
+            assert process.stdin is not None and process.stdout is not None
+            process.stdin.write(
+                (json.dumps({"id": identifier, "method": method, "params": params}) + "\n").encode()
+            )
             process.stdin.flush()
-
-        def request(method: str, params: dict) -> dict:
-            nonlocal identifier, pending
-            identifier += 1
-            send({"id": identifier, "method": method, "params": params})
-            deadline = time.monotonic() + 30
-            while True:
-                if time.monotonic() >= deadline:
-                    raise UpdateError(f"Codex app-server timed out during {method}")
-                while b"\n" not in pending:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0 or not selector.select(remaining):
-                        raise UpdateError(f"Codex app-server timed out during {method}")
-                    assert process.stdout is not None
-                    chunk = os.read(process.stdout.fileno(), 65536)
-                    if not chunk:
-                        raise UpdateError(f"Codex app-server exited during {method}")
-                    pending.extend(chunk)
-                line, _, pending = pending.partition(b"\n")
-                response = json.loads(line)
-                if response.get("id") != identifier:
-                    continue
-                if "error" in response:
-                    raise UpdateError(f"Codex {method} failed: {response['error']}")
-                return response["result"]
+            pending = bytearray()
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if not selector.select(max(0, deadline - time.monotonic())):
+                    break
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending.extend(chunk)
+                while b"\n" in pending:
+                    line, _, pending = pending.partition(b"\n")
+                    response = json.loads(line)
+                    if response.get("id") == identifier:
+                        if "error" in response or "result" not in response:
+                            raise UpdateError(f"Codex {method} failed: {response}")
+                        return
+            raise UpdateError(f"Codex did not answer {method}; enablement was not verified.")
 
         try:
+            request(1, "initialize", {"clientInfo": {"name": "ysk-dev-update", "version": "1"}})
+            process.stdin.write(b'{"method":"initialized","params":{}}\n')
             request(
-                "initialize",
-                {
-                    "clientInfo": {"name": "ysk-development-updater", "version": "1"},
-                    "capabilities": {"experimentalApi": True},
-                },
-            )
-            send({"method": "initialized", "params": {}})
-            layers = request("config/read", {"includeLayers": True})["layers"]
-            user = next(layer for layer in layers if layer["name"]["type"] == "user")
-            request(
+                2,
                 "config/value/write",
                 {
-                    "keyPath": "plugins." + json.dumps(plugin_id) + ".enabled",
+                    "keyPath": f"plugins.{json.dumps(plugin_id)}.enabled",
                     "value": enabled,
                     "mergeStrategy": "replace",
-                    "filePath": user["name"]["file"],
-                    "expectedVersion": user["version"],
+                    "filePath": str(codex_home() / "config.toml"),
                 },
             )
         finally:
@@ -436,7 +408,22 @@ def set_enabled(root: Path, plugin_id: str, enabled: bool) -> None:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=5)
+                process.wait()
+
+
+def verify_restoration(root: Path, backup: Path, plugins: list[dict]) -> None:
+    restored, registered = inventory(root)
+    if (
+        not registered
+        or Path(registered["root"]).resolve() != (backup / "marketplace").resolve()
+        or len(restored) != len(plugins)
+    ):
+        raise UpdateError("Restored marketplace or installed plugin count does not match.")
+    for expected, actual in zip(plugins, restored, strict=True):
+        if any(actual.get(key) != expected.get(key) for key in ("pluginId", "version", "enabled")):
+            raise UpdateError("Restored plugin version or enablement does not match.")
+        if file_hashes(installed_files(actual)) != file_hashes(backup / "marketplace/plugin"):
+            raise UpdateError("Restored plugin files do not match the saved installation.")
 
 
 def install(root: Path, bundle: Path) -> None:
@@ -452,9 +439,7 @@ def install(root: Path, bundle: Path) -> None:
     ):
         print("This development build is already installed and enabled.", flush=True)
         return
-    backup = None
-    if marketplace:
-        backup = backup_installation(root, plugins, marketplace)
+    backup = backup_installation(plugins, marketplace) if marketplace else None
     try:
         # Removing the plugin alone leaves the conflicting marketplace registration.
         for plugin in plugins:
@@ -485,16 +470,8 @@ def install(root: Path, bundle: Path) -> None:
                 for plugin in plugins:
                     codex(root, "add", plugin["pluginId"])
                     if not plugin["enabled"]:
-                        set_enabled(root, plugin["pluginId"], False)
-                restored, _ = inventory(root)
-                if [(p["version"], p["enabled"]) for p in restored] != [
-                    (p["version"], p["enabled"]) for p in plugins
-                ]:
-                    raise UpdateError("Restored plugin version or enabled state does not match")
-                if restored and package_contents(
-                    installed_package(restored[0])
-                ) != package_contents(backup / "marketplace/plugin"):
-                    raise UpdateError("Restored plugin files do not match the installed backup")
+                        set_plugin_enabled(root, plugin["pluginId"], False)
+                verify_restoration(root, backup, plugins)
                 print(f"Restored the previous files from a local backup: {backup}", file=sys.stderr)
         except (Exception, KeyboardInterrupt) as rollback_error:
             print(
