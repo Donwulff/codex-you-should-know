@@ -3,6 +3,7 @@ import json
 from dataclasses import replace
 
 import pytest
+from review_responses import clear_response
 
 from you_should_know import backend, cli
 from you_should_know.assessment import Finding
@@ -58,7 +59,7 @@ def test_transient_transcript_failure_retries_and_retains_diagnostics(
 
     def reviewer(*args, **kwargs):
         calls.append(kwargs["timeout"])
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(cli.time, "sleep", recover)
     monkeypatch.setattr(backend, "review", reviewer)
@@ -94,7 +95,7 @@ def test_persistent_transcript_failure_skips_without_budget_and_recovers(
     assert report["unreviewable_sessions"][0]["consecutive_transcript_failures"] == 3
     assert len(report["recent_transcript_errors"][0]["diagnostics"]["transcript_errors"]) == 2
     write_rollout(path)
-    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *a, **k: clear_response())
     assert cli.check(state, Config(), "s", path, "Stop")["status"] == "clear"
     assert state.diagnostics()["unreviewable_sessions"] == []
 

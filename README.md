@@ -44,7 +44,7 @@ You Should Know status
 
 An empty check history is normal immediately after installation. After you finish a turn, `status` shows recent check outcomes, candidate counts and reasons, error counts, latency, and reported token usage. Skipped checks, such as cadence, cooldown, and budget skips, are hidden from `recent_checks` unless you pass `--skipped`. Checks that read an unchanged excerpt remain visible. Totals still include skipped checks. Status also shows when each hook last ran and warns when a hook has never run while others have. A missing hook may be untrusted or may not have had an opportunity to run yet. A completed review can return no finding.
 
-Use `status --cwd PATH` to inspect one recorded working directory and `status --limit N` to change the default of 20 rows in each recent-check list. The directory filter applies to sessions, candidate counts and reasons, checks, totals, model usage, transcript errors, hook sightings, warnings, and mutes. Settings remain global. Directory matching uses the session's latest recorded working directory, resolves relative paths and symlinks, and excludes records whose session directory is unknown. It does not include subdirectories automatically.
+Use `status --cwd PATH` to inspect one recorded working directory and `status --limit N` to change the default of 20 rows in each recent-check list. The directory filter applies to sessions, candidate counts and reasons, checks, totals, model usage, transcript errors, hook sightings, warnings, and mutes. Settings and `reviewer_backoff` remain global. Directory matching uses the session's latest recorded working directory, resolves relative paths and symlinks, and excludes records whose session directory is unknown. It does not include subdirectories automatically.
 
 Checks that create or resolve a candidate include its ID, topic, summary, and current status and reason. Checks that publish a note also include a compact note summary. These linked objects reflect their current retained state; the check's own outcome and reason retain the historical result. Older checks have null links, and an expired candidate or note has a null summary. The command does not infer links from matching topics.
 
@@ -52,12 +52,48 @@ Token totals include usage reported before a result failed validation. `usage_un
 
 `recent_checks` defaults to the newest 20 checks that actually ran, including unchanged excerpts, clear results, findings, pending or withdrawn candidates, and errors. Cadence, cooldown, budget, disabled, and busy-reviewer skips are omitted. Each row includes token usage when a model was called. When the check created or resolved a candidate or note, the row also includes that item's topic and summary. Use `status --skipped` to include skipped attempts, `status --limit N` to change how many rows are returned, and `status --cwd PATH` to limit the report to one working directory. `model_source` is `config` for the plugin setting, `hook` for the active chat's model, or `argument` for a manual `--model` option. `model_usage` totals calls, errors, and tokens by model and source. Review and confirmation calls are recorded separately, so a model change between them remains visible. Older records and checks with no model call have a null model. If the reviewer CLI chooses its own model, the source is `cli_default` and the model stays null because that CLI does not report its choice.
 
+When an initial review returns no finding, its `reason` now gives a short explanation.
+`diagnostics.no_finding` contains that explanation and one category:
+
+| Category | Reviewer's stated reason |
+| --- | --- |
+| `no_concern` | No concrete concern identified in the supplied evidence. |
+| `already_disclosed` | The assistant already explained the practical consequence. |
+| `in_progress` | Work addresses this specific concern, or the assistant needs a chance to respond. |
+| `insufficient_evidence` | A possible concern lacks supporting tool-result evidence. |
+| `resolved_or_accepted` | The concern was fixed or the user accepted the tradeoff. |
+| `already_reported` | Previous notes or known/dismissed topics already cover it. |
+
+`no_finding_reasons` totals these categories across retained clear reviews. It honors
+`--cwd` and is independent of `--limit` and `--skipped`. Older clear reviews appear
+with a null category because their reasoning was not recorded. These are the
+reviewer's decision summaries, not verified conclusions or published notes. They
+expire with check history and do not create alerts or extra model calls. Manual
+checks also return the classification in `no_finding`.
+
 You can inspect transcript health in `status`:
 
 - Each session reports `unknown_record_types`, counting skipped record types in its latest successful full read, and `consecutive_transcript_failures`, counting failed review checks since its last successful read. Repeated reads do not accumulate unknown-type counts. Cadence and budget skips leave the failure count unchanged.
 - `unreviewable_sessions` lists every session with at least `transcript_failure_threshold` consecutive failures; the threshold is 3.
 - `recent_transcript_errors` contains the latest 20 checks with read errors, including recovered retries. Each error records the path, file size, modification time in nanoseconds, physical line number, byte offset when available, and an escaped representation of the failing line's first 200 bytes. Unavailable metadata is null. Reply-menu read failures appear with phase `reply`; they do not increment the review failure counter.
 - `recent_evidence_rejections` contains the latest 20 checks with rejected evidence. Diagnostics include the reason, escaped quotes, source labels, and an approximate nearest match with a similarity ratio and differing spans. Quote and match displays are capped at 500 characters; at most eight quotes and eight differences per quote are retained, with omitted counts. Approximate matches are diagnostic only and never make a quote valid.
+
+When a parsed review or confirmation response fails validation, its check also
+stores `diagnostics.rejected_response`. The `json` field is an ASCII-escaped JSON
+serialization of the rejected response, including the proposed topic, summary,
+explanation, and evidence when present. It is capped at 16,384 characters;
+`length` gives its original serialized length and `truncated` indicates clipping.
+When `truncated` is false, parsing `json` recovers the complete response object.
+This is unvalidated model output, not a candidate or note. It can contain private
+conversation excerpts and expires with the check. It is never included in hook
+alerts or used to bypass validation. Successful responses do not gain an extra
+copy, and transport failures without a parsed response cannot populate this field.
+Older rejected responses cannot be reconstructed from quote diagnostics alone.
+
+Reviewer subprocess failures record a sanitized category, the last observed
+stage, and the effective timeout in `diagnostics.backend`. Recognized retry
+delays appear there too. Raw stderr is not retained. A timeout does not establish
+whether networking, inference, or shutdown stalled.
 
 Each affected check also carries its own `diagnostics` object in `recent_checks`. `--limit` applies separately to `recent_checks`, `recent_transcript_errors`, and `recent_evidence_rejections`; it does not limit totals or candidate counts. Diagnostics expire with their check records under `retention_days`. Historical records have no reconstructed diagnostics.
 
@@ -82,7 +118,7 @@ Start a new session after updating. Review and trust any new or modified definit
 
 Continue working in Codex. After six completed tools, the plugin can start a background review. With no pending candidate, a review looks for one new concern. A concern first becomes a pending candidate. At the next eligible check or at turn end, a separate confirmation review checks that candidate against the conversation added since the first review. While a candidate is pending, eligible checks confirm it rather than search for another concern. A successful finding normally uses two model calls: the initial review and one confirmation. Both reviews use the supplied conversation log; they do not independently inspect your system.
 
-Initial findings about work still in progress are recorded as suppressed. If confirmation finds the concern fixed, disclosed, still being worked on, or unsupported, the candidate is recorded as withdrawn, with a reason. A failed confirmation also withdraws the candidate; it does not show the original finding. If the call budget or check time limit prevents confirmation from starting, the candidate stays pending for the next eligible check. At turn end, the plugin reports that pending state instead of silently losing the candidate.
+Initial findings about work still in progress are recorded as suppressed. If confirmation finds the concern fixed, disclosed, still being worked on, or unsupported, the candidate is recorded as withdrawn, with a reason. A confirmation that fails because of a rate limit, timeout, or recognized connection error keeps the candidate pending; other confirmation failures withdraw it. Neither path shows an unconfirmed finding. If the call budget or check time limit prevents confirmation from starting, the candidate stays pending for the next eligible check. At turn end, the plugin reports that pending state instead of silently losing the candidate.
 
 Confirmation reads the latest available conversation before its model call. If that conversation shows that the concern was fixed, disclosed, accepted, still being worked on, or unsupported, the reviewer can withdraw it. New messages or tool activity arriving during the call do not cancel an approved result or trigger another confirmation. For example, unrelated tests finishing during confirmation do not postpone a note about lost settings. The assistant might also restore those settings while confirmation is running, so a note can occasionally arrive after its cause has been resolved. The note reflects the conversation supplied to the reviewer.
 
@@ -90,13 +126,40 @@ Published notes are not automatically reassessed or marked resolved by later rev
 
 The end-of-turn hook waits for an outstanding review, then reviews the finished turn or confirms a pending candidate even during the background review cooldown. This lets the reviewer reassess work it previously suppressed as still in progress. Call budgets still apply, and an unchanged excerpt does not start another review. A final check also covers turns without tools. Confirmed notes appear after a subsequent tool or at turn end, and queued notes survive a restart. Set `final_check = false` to skip blocking reviews and confirmations at turn end; queued notes still appear, while candidates wait for the next eligible background check.
 
+The check deadline covers lock waiting, transcript reading, review, and confirmation.
+An end-of-turn review can use all remaining time. Confirmation waits for a later
+check when less than 10 seconds remain, or less than half the configured timeout
+when that is smaller.
+
+When a reviewer reports a rate limit, automatic checks using the same requested
+model pause across sessions sharing the data directory. The pause is 1–3,600
+seconds from a recognized retry delay, or 300 seconds without one. `status` shows
+active pauses in `reviewer_backoff` with their model and Unix `retry_at` time.
+A null model means the reviewer CLI selects its default. Manual checks can probe
+recovery during the pause; a successful probe does not clear the existing pause.
+
 Automatic hooks skip local `codex exec` (including `codex e` and `codex exec resume`) and `codex review` runs when the current process identifies them. These clients do not display the plugin's note text. Skipped hooks make no reviewer requests, spend no check attempts, and leave pending notes untouched. Explicit manual checks remain available in these runs.
 
 Detection uses the current Codex process on Linux, WSL, and macOS. A thread created by `exec` can receive automatic checks when resumed interactively. Unrecognized clients, shared app servers, unreadable process information, and unfamiliar command-line options retain automatic checks. Put image arguments after the subcommand, as in `codex exec --image picture.png`, for reliable detection.
 
 Background checks are at least 120 seconds apart. By default, each session has a rolling budget of 30 model calls per hour, including confirmation calls and failed requests. Unchanged excerpts and other checks that make no model request do not spend that budget. When the budget is exhausted, the plugin shows one notice and retains pending candidates. Calls become available again as earlier calls leave the rolling hour. An explicitly configured `max_checks_per_session` still applies as an additional lifetime limit, including resumed sessions.
 
-The reviewer looks for consequential mistakes, overlooked constraints, and tradeoffs demonstrated by tool results. A user request, bug report, or issue description alone is not proof of a defect. Findings require an exact quote from a tool result; findings contradicting an assistant claim also require a quote from that claim. The reviewer checks whether the assistant already disclosed the concern and can return no note. An alert looks like this:
+The reviewer looks for useful, concrete mistakes, overlooked constraints, and
+tradeoffs demonstrated by tool results. Modest costs, wasted effort, unavailable
+features, and avoidable maintenance problems can qualify; the impact need not be
+severe. Tool results showing actual settings, source code, or diffs can establish
+a mismatch without an observed outage when the causal link is clear. Explanations
+ask for two to four informative sentences separating observations from inferences.
+Unrelated work continuing does not suppress a concern, and mentioning a topic does
+not necessarily disclose its consequence. These prompt changes aim to increase
+sensitivity; their effect on useful findings and false alarms has not been evaluated.
+
+A user request, bug report, or issue description alone is not proof of a defect.
+Findings require an exact quote from a tool result; findings contradicting an
+assistant claim also require a quote from that claim. Generic advice, cosmetic
+preferences, unsupported possibilities, and repeated concerns remain excluded.
+The reviewer checks whether the assistant already disclosed the concern and can
+return no note. Separate confirmation still applies. An alert looks like this:
 
 ```text
 You Should Know [8f31a7c62b40] · Your previous settings were deleted.
@@ -290,7 +353,7 @@ python3 scripts/you_should_know.py --data-dir /path/to/ysk-data status
 
 The reviewer and confirmation reviewer run separately with a read-only sandbox. Tool use invalidates either result. Both calls validate evidence quotes against exactly the conversation excerpts shown after budgeting. Each quote must fit within one source block, excluding generated truncation markers and headers. Conversation text is sent as plain text; CRLF, tabs, trailing spaces, backslashes, and Unicode retain their exact spelling without normalization. Previous-note summaries and candidate descriptions cannot supply evidence. This does not promise that every Codex backend can hide every tool from the reviewer.
 
-Checks retain the first three user messages and recent transcript activity within a character budget. A second byte limit bounds the complete model input, dropping older note summaries first and shortening the conversation with a visible marker if necessary. A note can still miss earlier context or be mistaken. Failed or timed-out checks do not interrupt the main task. Use `status` to inspect check state and errors. Native buttons and a separate alert panel would require changes to Codex itself.
+Checks reserve space for the latest three user messages, then fill the remaining character budget with recent transcript activity. Retained messages stay in their original order and appear once, with visible markers for omitted work. This lets a resumed conversation retain its new request after a long tool-heavy turn, instead of permanently pinning its first task. Large individual messages are shortened; extremely small budgets can drop the oldest reserved messages to keep the latest work visible. A second byte limit bounds the complete model input, dropping older note summaries first and preserving recent user messages when it shortens the conversation further. Confirmation applies the same protection to its original and subsequent excerpts. A note can still miss older instructions or be mistaken. Failed or timed-out checks do not interrupt the main task. Use `status` to inspect check state and errors. Native buttons and a separate alert panel would require changes to Codex itself.
 
 Only visible `response_item` content enters the excerpt. Unknown rollout record types are skipped and counted, while arbitrary JSONL without a recognized Codex record type is rejected. `retained_context` and `compacted` checkpoints do not add duplicate answers or encrypted compaction content to the reviewer input.
 
@@ -340,10 +403,15 @@ After validation, it replaces the existing `you-should-know@you-should-know`
 installation and marketplace registration with the local bundle. This handles
 switching from the GitHub installation as well as subsequent development updates,
 without leaving two copies enabled. Other marketplaces are untouched. Your notes
-and YSK `config.toml` remain in their existing data directory. A failed installation
-attempts to restore the previous files from a local backup; it prints the backup
-location and retains it if restoration is needed. Restoration uses the saved local
-files rather than relying on a GitHub download.
+and YSK `config.toml` remain in their existing data directory. Before replacement,
+the updater saves the installed plugin cache under
+`${CODEX_HOME:-~/.codex}/plugin-update-backups`, separately from the marketplace
+source. This also supports a local marketplace pointing at the checkout itself.
+A failed installation attempts to restore those saved files and the previous
+enabled or disabled setting, even if the marketplace has since advanced. Recovery
+checks the restored files, version, and enablement before reporting success and
+does not require a GitHub download. It prints the backup location and retains it
+as the recovery marketplace; keep that directory until a later successful update.
 
 Reopen the Codex client afterward and open `/hooks` to review and trust the four hooks. A local
 development installation stays on the local bundle until you run the script again.

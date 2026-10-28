@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
+from review_responses import clear_response
 
 from you_should_know import backend, cli
 from you_should_know import transcript as transcript_module
@@ -40,6 +41,7 @@ def reviewer(monkeypatch):
         if schema == cli.CONFIRMATION_SCHEMA:
             return {"confirmed": True, "reason": "Unresolved", "evidence": [quote]}
         return {
+            "no_finding": None,
             "finding": {
                 "topic": quote,
                 "summary": quote,
@@ -47,7 +49,7 @@ def reviewer(monkeypatch):
                 "evidence": [quote],
                 "agent_still_working": False,
                 "assistant_claim": False,
-            }
+            },
         }
 
     monkeypatch.setattr(backend, "review", review)
@@ -104,7 +106,7 @@ def test_background_read_failures_back_off_without_spending_model_budget(
     now = [1000.0]
     monkeypatch.setattr(cli.time, "time", lambda: now[0])
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
-    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *a, **k: clear_response())
     config = replace(Config(), every_n_tools=1)
     assert cli.check(state, config, "s", path, "PostToolUse")["status"] == "transcript_unavailable"
     for _ in range(4):
@@ -192,7 +194,7 @@ def test_failure_backoff_survives_restart_and_stop_can_recover(state, tmp_path, 
     path.write_bytes(b"\x00\n")
     monkeypatch.setattr(cli.time, "time", lambda: 1000.0)
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
-    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *a, **k: clear_response())
     config = replace(Config(), every_n_tools=1)
     assert cli.check(state, config, "s", path, "PostToolUse")["status"] == "transcript_unavailable"
     reopened = State(state.directory)

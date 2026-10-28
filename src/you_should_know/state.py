@@ -924,6 +924,16 @@ class State:
                 )
             ],
             "candidate_reasons": reasons,
+            "no_finding_reasons": [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT json_extract(diagnostics, '$.no_finding.category') AS category, "
+                    "count(*) AS total FROM checks "
+                    f"WHERE {scope} AND phase = 'review' AND outcome = 'clear' "
+                    "GROUP BY category ORDER BY total DESC, category",
+                    params,
+                )
+            ],
             "recent_checks": recent_checks("1" if include_skipped else "outcome != 'skipped'"),
             "recent_transcript_errors": recent_checks(
                 "json_array_length(diagnostics, '$.transcript_errors') > 0"

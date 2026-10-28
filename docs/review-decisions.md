@@ -79,3 +79,64 @@ check permits another review. Rediscovery is possible, not guaranteed.
 
 Published notes, including known or dismissed ones, suppress repeated topics
 while retained. This does not track later changes to their underlying cause.
+
+## Trial: explain clear reviews and include smaller concrete concerns
+
+Added 2026-10-26 after observing many clear reviews and very few candidates.
+The initial reviewer now supplies a bounded category and brief decision summary
+when it returns no finding. Status retains those explanations and category totals;
+historical reviews stay unclassified. This helps distinguish lack of evidence,
+disclosure, ongoing work, and other reasons for silence. The classification is a
+model judgment, not independent verification of why no useful concern was found.
+
+The prompts also explicitly allow modest practical consequences and tool evidence
+from settings, code, or diffs with a clear causal link. An outage or severe impact
+is not required. Unrelated activity is not evidence that the specific concern is
+being addressed, and merely mentioning a topic does not disclose its consequence.
+Finding explanations should describe the observed behavior, practical effect,
+and relevant uncertainty in two to four sentences.
+
+Exact tool-result evidence, separate confirmation, and suppression of disclosed,
+resolved, accepted, repeated, or actively addressed concerns still apply.
+Whether this increases useful findings or false alarms remains to be evaluated.
+
+## Retain rejected responses for diagnosis
+
+Added 2026-10-28 after an evidence-escaping mismatch discarded a proposed finding
+before candidate creation. Existing diagnostics preserved the quotes but lost
+the topic, summary, and explanation, leaving no way to inspect the proposed concern.
+
+Assessment failures now retain up to 16,384 characters of serialized response JSON
+in the check's diagnostics, including an original length and truncation flag.
+The existing check retention policy applies. These are unvalidated responses;
+they never become notes or bypass exact evidence validation. Transport failures
+without a parsed response remain outside this capture. A replay is a new model
+decision, not recovery of a historical response.
+
+## Reinforce literal quote copying
+
+Added 2026-10-28 after a reviewer decoded literal newline and tab escapes from
+JSON embedded in tool output, despite the existing instruction to preserve them.
+Both review stages now include concrete source-to-response JSON examples and
+repeat the literal-copy rule after the conversation. Shorter quotes are encouraged
+when they still support the concern. Exact matching remains unchanged; this is
+a prompt mitigation whose effect on model behavior has not yet been measured.
+
+## Preserve the current request in resumed conversations
+
+Changed 2026-10-28 after reviewing a long-lived conversation resumed for a new
+task. The excerpt retained the first three user messages from months earlier,
+while a long sequence of tool results displaced the current request. A replay
+then evaluated the recent work against requirements from the old task.
+
+The transcript reader now reserves up to a third of the character budget for
+the latest three user messages and fills the remaining space with recent work.
+It merges these by their original positions, without duplication, and marks
+omitted regions. The model-input byte-budget pass also reserves room for recent
+user messages, including when confirmation shortens an already-shortened excerpt.
+Prompts explicitly distinguish current requests from completed or superseded tasks.
+
+This remains bounded selection, not a complete task history. Large messages can
+be clipped, tiny budgets can omit older reserved messages, and requirements more
+than three user messages back can still fall outside the activity window.
+The algorithm does not claim to identify which older requests remain relevant.

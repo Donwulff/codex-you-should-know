@@ -11,18 +11,23 @@
 
 - Added `scripts/dev_update.py` to merge upstream changes, preserve local edits, validate the checkout, and install a versioned development bundle. Failed installations restore a snapshot of the previously installed package and its enabled state; `--prepare-only` validates and builds without changing the installed plugin.
 - Include sanitized reviewer failure categories, subprocess stages, timeout budgets, and recognized retry delays in check diagnostics. Show active model pauses in `status` under `reviewer_backoff`.
+- Retain parsed review and confirmation responses that fail validation in `diagnostics.rejected_response`, capped at 16,384 serialized characters with explicit length and truncation metadata. This preserves rejected summaries and explanations for inspection without creating candidates or notes, weakening evidence checks, or making extra model calls.
+- Record a bounded category and explanation when an initial review returns no finding. `status` exposes per-check `diagnostics.no_finding` and scoped `no_finding_reasons` totals; older clear reviews retain an unknown category. These diagnostics do not create notes or additional reviewer calls.
 - Add `notes --cwd` and `status --cwd` to inspect one session working directory, including scoped check history, totals, model usage, transcript diagnostics, hook sightings, warnings, and mutes.
 - Show compact pending candidates alongside published notes. `notes --all` includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit stored transcripts and evidence and do not trigger reviewer calls.
 - Add `status --limit` and `status --skipped`. Recent check history hides skipped checks by default while totals retain them. New check records link to compact candidate and note summaries; legacy associations remain unknown.
-- Added `scripts/dev_update.py` to merge tracked upstream changes, preserve local edits, run validation, build a versioned development bundle, and switch an existing GitHub or local installation to that bundle. Installation failures attempt restoration from a local backup; running standalone Codex CLI sessions prevent replacement of their hook files. Persistent app-server and code-mode-host services do not block updates.
 
 ### Changed
 
+- Reinforce literal evidence copying in both reviewer prompts with newline/tab JSON examples, explicit guidance against decoding nested tool-output JSON, and reminders after the conversation. Exact validation remains unchanged; improved model compliance is not yet measured.
+- Broaden review and confirmation prompts to include modest, concrete practical consequences supported by tool evidence. Clarify that unrelated ongoing work does not suppress a concern and a topic mention does not necessarily disclose its consequence. Ask for fuller finding explanations and brief decision summaries for clear reviews. Review quality and false-alarm effects remain unevaluated.
 - Added concise reminders after review and confirmation context, and clarified the observer's focus on practical consequences and explanations in plain language. Prompt changes have not been evaluated for model quality.
 - Explained model selection in terms of the active chat, the plugin's own model override, and the separate reviewer CLI's fallback with user configuration ignored.
 
 ### Fixed
 
+- Preserve the latest three user messages when shortening long transcripts, instead of pinning the first three indefinitely. Keep requests and corrections in their original order alongside recent work, and preserve them through further model-input shortening and confirmation. Mark omitted regions and keep repeated clipping from turning truncation-marker fragments into evidence.
+- Prevent recursive development-update backups when the checkout itself is the local marketplace. Rollback now restores and verifies the installed cache's files and version, preserves disabled plugins, and keeps recovery files under `CODEX_HOME/plugin-update-backups`.
 - Accept a valid confirmation against the conversation supplied to the reviewer. New messages or tool activity during the model call no longer withdraw an approved candidate or trigger extra confirmations. A failed transcript read after confirmation starts still prevents publication. A note can occasionally arrive after its cause has been resolved; published notes are not automatically reassessed by later reviews.
 
 ## [0.3.3] - 2026-10-26

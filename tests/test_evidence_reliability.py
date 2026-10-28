@@ -4,11 +4,12 @@ from difflib import SequenceMatcher
 import pytest
 
 from you_should_know import assessment
-from you_should_know.transcript import frame, source_blocks
+from you_should_know.transcript import frame, read_snapshot, source_blocks
 
 
 def finding_response(quotes):
     return {
+        "no_finding": None,
         "finding": {
             "topic": "preferences overwritten",
             "summary": "Saving settings removed your preferences.",
@@ -16,7 +17,7 @@ def finding_response(quotes):
             "evidence": quotes,
             "agent_still_working": False,
             "assistant_claim": False,
-        }
+        },
     }
 
 
@@ -44,6 +45,18 @@ def test_prompts_preserve_literal_escapes_without_decoding_them(confirmation):
     assert "Preserve literal backslashes already present in a block" in prompt
     assert "do not turn literal \\n or \\t into newline or tab characters" in prompt
     assert "After JSON decoding, each evidence string must equal the copied source text" in prompt
+    # Check the actual JSON examples shown to the model, including Python string escaping.
+    example_lines = prompt.split("Formatting examples only;", 1)[1].splitlines()
+    examples = []
+    for line, following in zip(example_lines, example_lines[1:], strict=False):
+        if line.startswith("- Source text: "):
+            source = line.removeprefix("- Source text: ")
+            encoded = following.strip().removeprefix("JSON evidence string: ")
+            examples.append((source, json.loads(encoded)))
+    assert examples == [
+        (r"first\nsecond", r"first\nsecond"),
+        (r"12\t0\tGUIDE.md", r"12\t0\tGUIDE.md"),
+    ]
     evidence = [quote]
     response = (
         {"confirmed": True, "reason": "Unresolved", "evidence": evidence}
@@ -121,6 +134,55 @@ def test_review_preparation_returns_only_the_conversation_shown_after_clipping()
     assert assessment.parse_finding(finding_response(["LAST"]), shown) is not None
 
 
+@pytest.mark.parametrize("confirmation", [False, True])
+def test_recent_requests_survive_both_transcript_and_model_input_limits(tmp_path, confirmation):
+    payloads = [
+        {"type": "message", "role": "user", "content": f"Old request {i}"} for i in range(3)
+    ]
+    requests = ["Current documentation task", "Preserve existing results", "Continue this review"]
+    payloads.extend(
+        {"type": "message", "role": "user", "content": request + "\n" + "😀" * 30000}
+        for request in requests
+    )
+    payloads.append(
+        {
+            "type": "function_call_output",
+            "call_id": "result",
+            "output": "DATA" * 80000 + "\nLatest tool result",
+        }
+    )
+    path = tmp_path / "synthetic-rollout.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps({"type": "response_item", "payload": payload}, ensure_ascii=False) + "\n"
+            for payload in payloads
+        )
+    )
+    text, _ = read_snapshot(path, 200000)
+    assert len(text) <= 200000
+    assert len(text.encode()) > assessment.MAX_PROMPT_BYTES
+    if confirmation:
+        candidate = assessment.Finding("topic", "summary", "explanation", ["Latest tool result"])
+        # Confirmation can shorten an excerpt that was already shortened for
+        # initial review; a message's clipped fragments must remain one source.
+        _, text = assessment.prepare_prompt(text, [])
+        subsequent = frame("tool result: id=later", "MORE" * 60000 + "\nSubsequent result")
+        prompt, shown = assessment.prepare_confirmation_prompt(candidate, text, subsequent)
+        assert "Subsequent result" in shown
+    else:
+        prompt, shown = assessment.prepare_prompt(text, [])
+    assert len(prompt.encode()) <= assessment.MAX_PROMPT_BYTES
+    bodies = list(source_blocks(shown))
+    for request in requests:
+        assert any(label == "user" and request in body for label, body in bodies)
+        assert shown.count(request) == 1
+    assert "Old request" not in shown
+    assert sum(label == "user" for label, _ in bodies) == 3
+    assert any(
+        label.startswith("tool result:") and "Latest tool result" in body for label, body in bodies
+    )
+
+
 def test_confirmation_preparation_validates_only_shown_original_and_subsequent_text():
     candidate = assessment.Finding("topic", "summary", "explanation", ["BEFORE"])
     original = frame(
@@ -166,6 +228,30 @@ def test_rejected_evidence_diagnostics_show_escaped_quote_and_nearest_difference
         {"operation": "replace", "quote_span": [9, 10], "match_span": [9, 10]}
     ]
     assert json.loads(json.dumps(details)) == details
+
+
+@pytest.mark.parametrize("value", [None, [], {"unexpected": "field\n\t\\n\x00漢😀"}])
+def test_rejected_response_diagnostics_preserve_invalid_json_values(value):
+    saved = assessment.rejected_response_diagnostics(value)
+    assert not saved["truncated"]
+    assert saved["length"] == len(saved["json"])
+    assert saved["json"].isascii()
+    assert not any(ord(char) < 32 for char in saved["json"])
+    assert json.loads(saved["json"]) == value
+
+
+@pytest.mark.parametrize("extra", [0, 1, 50000])
+def test_rejected_response_diagnostics_bound_escaped_json(extra):
+    limit = assessment.MAX_REJECTED_RESPONSE_CHARS
+    value = {"unexpected": "😀" * 100}
+    overhead = len(json.dumps(value, ensure_ascii=True, separators=(",", ":")))
+    value["padding"] = "x" * (limit - overhead - len(',"padding":""') + extra)
+    saved = assessment.rejected_response_diagnostics(value)
+    assert saved["length"] == limit + extra
+    assert len(saved["json"]) == limit
+    assert saved["truncated"] == bool(extra)
+    if not extra:
+        assert json.loads(saved["json"]) == value
 
 
 @pytest.mark.parametrize("quotes", [[], [None], "not a list", ["\x00" * 501]])

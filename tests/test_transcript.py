@@ -132,7 +132,7 @@ def test_preserves_request_after_initial_user_instruction_messages(tmp_path: Pat
     )
     text = read_transcript(path, max_chars=512)
     assert len(text) <= 512
-    assert "[Initial user messages]" in text
+    assert sum(label == "user" for label, _ in source_blocks(text)) == 3
     assert "Actual request: repair exporter" in text
     assert "Latest synthetic result: exporter verified" in text
 
@@ -146,7 +146,84 @@ def test_three_initial_messages_fit_the_minimum_budget(tmp_path: Path) -> None:
     text = read_transcript(path, max_chars=256)
     assert len(text) <= 256
     assert "Latest result" in text
-    assert "[Initial user messages]" in text
+    assert sum(label == "user" for label, _ in source_blocks(text)) == 3
+
+
+@pytest.mark.parametrize("budget", [1000, 60000, 200000])
+def test_resumed_session_keeps_recent_request_after_a_long_tool_heavy_turn(tmp_path, budget):
+    request = "Current request: review the repository situation and update the documentation."
+    resumed = "Resume after changing approval mode."
+    path = rollout(
+        tmp_path,
+        message("user", "Old repository instructions"),
+        message("user", "Old environment context"),
+        message("user", "Obsolete task: create a contributor guide"),
+        message("assistant", "The old task was completed."),
+        message("user", "New environment context after several months"),
+        message("user", request),
+        message("user", "<turn_aborted>Interrupted</turn_aborted>"),
+        message("user", resumed),
+        *(
+            {"type": "function_call_output", "call_id": str(i), "output": "work " * 1000}
+            for i in range(60)
+        ),
+        message("assistant", "Current documentation update complete."),
+    )
+    checkpoint = {}
+    text, offset = read_snapshot(path, budget, checkpoint=checkpoint)
+    assert len(text) <= budget
+    assert request in text and resumed in text
+    assert "Obsolete task" not in text
+    assert "Current documentation update complete." in text
+    assert text.index(request) < text.index(resumed) < text.index("update complete.")
+    assert text.count(request) == 1
+    assert offset == path.stat().st_size
+    assert read_since(path, offset) == ""
+
+
+def test_reserved_user_messages_stay_in_order_with_surrounding_work(tmp_path):
+    path = rollout(
+        tmp_path,
+        *(message("assistant", "Old work " * 1000) for _ in range(10)),
+        message("user", "Current task"),
+        message("assistant", "Result before correction"),
+        message("user", "Correction to current task"),
+        message("assistant", "Result after correction"),
+    )
+    blocks = list(source_blocks(read_transcript(path, 1000)))
+    assert blocks[-4:] == [
+        ("user", "Current task"),
+        ("assistant", "Result before correction"),
+        ("user", "Correction to current task"),
+        ("assistant", "Result after correction"),
+    ]
+
+
+def test_minimum_budget_keeps_latest_work_despite_separated_user_messages(tmp_path):
+    path = rollout(
+        tmp_path,
+        *(
+            payload
+            for i in range(6)
+            for payload in (message("user", f"Request {i}"), message("assistant", "x" * 1000))
+        ),
+        message("assistant", "LATEST RESULT"),
+    )
+    text = read_transcript(path, 256)
+    assert len(text) <= 256
+    assert "Request 5" in text
+    assert "LATEST RESULT" in text
+
+
+def test_reclipping_never_leaves_partial_generated_markers_as_evidence():
+    from you_should_know.transcript import _TRUNCATED, _clip_block
+
+    block = _clip_block(frame("user", "A" * 1000), 200)
+    for budget in range(20, 200):
+        clipped = _clip_block(block, budget)
+        assert len(clipped) <= budget
+        for _, body in source_blocks(clipped):
+            assert set(body.replace(_TRUNCATED, "").replace("…", "")) <= {"A"}
 
 
 def test_marks_truncation_inside_a_large_message(tmp_path: Path) -> None:

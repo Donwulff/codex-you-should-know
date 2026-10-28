@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
@@ -91,10 +92,21 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     if limit < len(_TRUNCATED) + 2:
-        return text[: limit - 1] + "…"
+        return text[: _marker_boundary(text, limit - 1, left=True)] + "…"
     remaining = limit - len(_TRUNCATED)
     start = (remaining + 1) // 2
-    return text[:start] + _TRUNCATED + text[-(remaining - start) :]
+    end = len(text) - (remaining - start)
+    start = _marker_boundary(text, start, left=True)
+    end = _marker_boundary(text, end, left=False)
+    return text[:start] + _TRUNCATED + text[end:]
+
+
+def _marker_boundary(text: str, position: int, *, left: bool) -> int:
+    """Never leave a piece of an earlier truncation marker inside evidence."""
+    start = text.rfind(_TRUNCATED, 0, position + len(_TRUNCATED))
+    if start < position < start + len(_TRUNCATED) and start >= 0:
+        return start if left else start + len(_TRUNCATED)
+    return position
 
 
 def source_blocks(text: str) -> Iterator[tuple[str, str]]:
@@ -124,6 +136,54 @@ def _clip_block(block: str, limit: int) -> str:
     if budget < 1:
         return _clip("[Content omitted]", max(1, limit))
     return frame(label, _clip(text, budget))
+
+
+def _recent_excerpt(
+    recent: deque[tuple[int, str]], users: deque[tuple[int, str]], max_chars: int
+) -> str:
+    """Reserve context for recent user messages, then fill with the latest activity."""
+    per_user = max_chars // (3 * max(1, len(users)))
+    selected = {index: _clip_block(block, per_user) for index, block in users}
+
+    def render() -> str:
+        parts = []
+        previous = 0
+        for index, block in sorted(selected.items()):
+            if index > previous + 1:
+                parts.append(_OMITTED)
+            parts.append(block)
+            previous = index
+        return "\n\n".join(parts)
+
+    # At very small budgets, gap markers also compete for room. Drop the oldest
+    # reserved message first so recent results always retain at least half.
+    while selected and len(render()) > max_chars // 2:
+        del selected[min(selected)]
+    indexes = sorted(selected)
+    used = len(render())
+
+    def gap(before: int, after: int) -> int:
+        return len(_OMITTED) + 2 if after > before + 1 else 0
+
+    for index, block in reversed(recent):
+        if index in selected:
+            continue
+        position = bisect_left(indexes, index)
+        before = indexes[position - 1] if position else 0
+        overhead = (2 if selected else 0) + gap(before, index)
+        if position < len(indexes):
+            after = indexes[position]
+            overhead += gap(index, after) - gap(before, after)
+        available = max_chars - used - overhead
+        if len(block) <= available:
+            selected[index] = block
+            indexes.insert(position, index)
+            used += overhead + len(block)
+            continue
+        if available > 0:
+            selected[index] = _clip_block(block, available)
+        break
+    return render()
 
 
 def _records(
@@ -236,7 +296,7 @@ def _read(
     checkpoint: dict[str, str] | None = None,
     expected_checkpoint: dict[str, str] | None = None,
 ) -> tuple[str, int]:
-    """Return visible text, retaining the first three user messages and recent work.
+    """Return visible text, retaining recent user messages and recent work.
 
     A metadata-only rollout is valid empty history. Missing files, empty files,
     malformed completed records, and unsupported formats raise TranscriptError.
@@ -248,7 +308,7 @@ def _read(
         checkpoint = {}
     recent: deque[tuple[int, str]] = deque()
     total = 0
-    initial: list[tuple[int, str]] = []
+    users: deque[tuple[int, str]] = deque(maxlen=3)
     omitted = False
     recognized = offset > 0
     sequence = 0
@@ -317,8 +377,8 @@ def _read(
                         continue
                     block, user = visible
                 sequence += 1
-                if user and len(initial) < 3:
-                    initial.append((sequence, _clip_block(block, max_chars // 3)))
+                if user:
+                    users.append((sequence, _clip_block(block, max_chars // 3)))
                 block = _clip_block(block, max_chars - 2)
                 recent.append((sequence, block))
                 total += len(block) + 2
@@ -371,25 +431,7 @@ def _read(
         unknown_types.update(unknown)
     if not omitted:
         return "\n\n".join(block for _, block in recent), cursor
-    prefix = ""
-    if initial:
-        per_message_budget = (max_chars // 3 - 2 * (len(initial) - 1)) // len(initial)
-        prefix = "[Initial user messages]\n"
-        prefix += "\n\n".join(_clip_block(block, per_message_budget) for _, block in initial)
-        prefix += "\n\n"
-        initial_indexes = {index for index, _ in initial}
-        recent = deque((index, block) for index, block in recent if index not in initial_indexes)
-    prefix += _OMITTED + "\n\n"
-    budget = max_chars - len(prefix)
-    total = sum(len(block) + 2 for _, block in recent) - 2
-    while len(recent) > 1 and total > budget:
-        _, removed = recent.popleft()
-        total -= len(removed) + 2
-    if len(recent) == 1:
-        tail = _clip_block(recent[0][1], budget)
-    else:
-        tail = "\n\n".join(block for _, block in recent)
-    return prefix + tail, cursor
+    return _recent_excerpt(recent, users, max_chars), cursor
 
 
 def read_transcript(path: Path, max_chars: int = 60_000) -> str:

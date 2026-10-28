@@ -23,8 +23,25 @@
           "additionalProperties": false
         }
       ]
+    },
+    "no_finding": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "enum": ["no_concern", "already_disclosed", "in_progress", "insufficient_evidence", "resolved_or_accepted", "already_reported"]
+            },
+            "reason": {"type": "string", "minLength": 1, "maxLength": 800}
+          },
+          "required": ["category", "reason"],
+          "additionalProperties": false
+        }
+      ]
     }
   },
-  "required": ["finding"],
+  "required": ["finding", "no_finding"],
   "additionalProperties": false
 }
