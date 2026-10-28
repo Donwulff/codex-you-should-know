@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added `scripts/dev_update.py` to merge upstream changes, preserve local edits, validate the checkout, and install a versioned development bundle. Failed installations restore a snapshot of the previously installed package and its enabled state; `--prepare-only` validates and builds without changing the installed plugin.
 - Include sanitized reviewer failure categories, subprocess stages, timeout budgets, and recognized retry delays in check diagnostics. Show active model pauses in `status` under `reviewer_backoff`.
 - Add `notes --cwd` and `status --cwd` to inspect one session working directory, including scoped check history, totals, model usage, transcript diagnostics, hook sightings, warnings, and mutes.
 - Show compact pending candidates alongside published notes. `notes --all` includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit stored transcripts and evidence and do not trigger reviewer calls.
