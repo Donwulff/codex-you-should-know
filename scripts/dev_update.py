@@ -7,11 +7,13 @@ import hashlib
 import json
 import os
 import runpy
+import selectors
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 NAME = "you-should-know"
@@ -248,6 +250,8 @@ def inventory(root: Path) -> tuple[list[dict], dict | None]:
             f"The {NAME} marketplace contains other installed plugins; leaving it intact."
         )
     copies = [p for p in plugins if p["name"] == NAME]
+    if len(copies) > 1:
+        raise UpdateError("Codex reported multiple YSK installations; leaving them intact.")
     if any(p["marketplaceName"] != NAME for p in copies):
         raise UpdateError("YSK is also installed from another marketplace; remove that copy first.")
     marketplace = next((m for m in marketplaces if m["name"] == NAME), None)
@@ -256,6 +260,183 @@ def inventory(root: Path) -> tuple[list[dict], dict | None]:
             "Could not find the existing YSK marketplace; leaving its installation intact."
         )
     return copies, marketplace
+
+
+def installed_package(plugin: dict) -> Path:
+    version = plugin.get("version")
+    if (
+        not isinstance(version, str)
+        or not version
+        or version in {".", ".."}
+        or Path(version).name != version
+    ):
+        raise UpdateError("Could not identify the installed YSK version; leaving it intact.")
+    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    package = home / "plugins/cache" / NAME / NAME / version
+    try:
+        manifest = json.loads((package / ".codex-plugin/plugin.json").read_text())
+    except (OSError, ValueError) as error:
+        raise UpdateError(f"Cannot back up the installed YSK package: {package}") from error
+    if manifest.get("name") != NAME or manifest.get("version") != version:
+        raise UpdateError(f"Installed YSK package does not match Codex inventory: {package}")
+    return package.resolve()
+
+
+def package_contents(package: Path) -> dict:
+    result = {}
+    for path in package.rglob("*"):
+        relative = str(path.relative_to(package))
+        if path.is_symlink():
+            result[relative] = ("link", os.readlink(path))
+        elif path.is_file():
+            result[relative] = (
+                "file",
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                path.stat().st_mode & 0o777,
+            )
+        elif path.is_dir():
+            result[relative] = ("directory",)
+        else:
+            raise UpdateError(f"Cannot back up a special file in the installed package: {path}")
+    return result
+
+
+def backup_installation(root: Path, plugins: list[dict], marketplace: dict) -> Path:
+    installed = installed_package(plugins[0]) if plugins else None
+    scratch = root / ".scratch"
+    scratch.mkdir(exist_ok=True)
+    backup = Path(tempfile.mkdtemp(prefix="dev-update-backup-", dir=scratch)).resolve()
+    recovery = backup / "marketplace"
+    try:
+        if installed:
+            shutil.copytree(installed, recovery / "plugin", symlinks=True)
+            if package_contents(installed) != package_contents(recovery / "plugin"):
+                raise UpdateError("Installed YSK files changed while backing them up; retry later.")
+            catalog = recovery / ".agents/plugins/marketplace.json"
+            catalog.parent.mkdir(parents=True)
+            catalog.write_text(
+                json.dumps(
+                    {
+                        "name": NAME,
+                        "plugins": [
+                            {
+                                "name": NAME,
+                                "source": {"source": "local", "path": "./plugin"},
+                                "policy": {
+                                    "installation": "AVAILABLE",
+                                    "authentication": "ON_INSTALL",
+                                },
+                            }
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        else:
+
+            def ignore(directory: str, names: list[str]) -> list[str]:
+                return [
+                    name
+                    for name in names
+                    if name in {".git", ".venv", "__pycache__"}
+                    or (Path(directory) / name).resolve() == backup
+                ]
+
+            shutil.copytree(marketplace["root"], recovery, symlinks=True, ignore=ignore)
+        (backup / "previous.json").write_text(
+            json.dumps({"marketplace": marketplace, "plugins": plugins}, indent=2) + "\n"
+        )
+    except BaseException:
+        shutil.rmtree(backup)
+        raise
+    return backup
+
+
+def set_enabled(root: Path, plugin_id: str, enabled: bool) -> None:
+    with (
+        tempfile.TemporaryFile() as errors,
+        subprocess.Popen(
+            [
+                "codex",
+                "app-server",
+                "--listen",
+                "stdio://",
+                "--disable",
+                "remote_plugin",
+                "--disable",
+                "apps",
+            ],
+            cwd=root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=errors,
+        ) as process,
+        selectors.DefaultSelector() as selector,
+    ):
+        assert process.stdin is not None and process.stdout is not None
+        selector.register(process.stdout, selectors.EVENT_READ)
+        pending = bytearray()
+        identifier = 0
+
+        def send(message: dict) -> None:
+            assert process.stdin is not None
+            process.stdin.write((json.dumps(message) + "\n").encode())
+            process.stdin.flush()
+
+        def request(method: str, params: dict) -> dict:
+            nonlocal identifier, pending
+            identifier += 1
+            send({"id": identifier, "method": method, "params": params})
+            deadline = time.monotonic() + 30
+            while True:
+                if time.monotonic() >= deadline:
+                    raise UpdateError(f"Codex app-server timed out during {method}")
+                while b"\n" not in pending:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise UpdateError(f"Codex app-server timed out during {method}")
+                    assert process.stdout is not None
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        raise UpdateError(f"Codex app-server exited during {method}")
+                    pending.extend(chunk)
+                line, _, pending = pending.partition(b"\n")
+                response = json.loads(line)
+                if response.get("id") != identifier:
+                    continue
+                if "error" in response:
+                    raise UpdateError(f"Codex {method} failed: {response['error']}")
+                return response["result"]
+
+        try:
+            request(
+                "initialize",
+                {
+                    "clientInfo": {"name": "ysk-development-updater", "version": "1"},
+                    "capabilities": {"experimentalApi": True},
+                },
+            )
+            send({"method": "initialized", "params": {}})
+            layers = request("config/read", {"includeLayers": True})["layers"]
+            user = next(layer for layer in layers if layer["name"]["type"] == "user")
+            request(
+                "config/value/write",
+                {
+                    "keyPath": "plugins." + json.dumps(plugin_id) + ".enabled",
+                    "value": enabled,
+                    "mergeStrategy": "replace",
+                    "filePath": user["name"]["file"],
+                    "expectedVersion": user["version"],
+                },
+            )
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def install(root: Path, bundle: Path) -> None:
@@ -273,18 +454,7 @@ def install(root: Path, bundle: Path) -> None:
         return
     backup = None
     if marketplace:
-        scratch = root / ".scratch"
-        scratch.mkdir(exist_ok=True)
-        backup = Path(tempfile.mkdtemp(prefix="dev-update-backup-", dir=scratch))
-        shutil.copytree(
-            marketplace["root"],
-            backup / "marketplace",
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__"),
-        )
-        (backup / "previous.json").write_text(
-            json.dumps({"marketplace": marketplace, "plugins": plugins}, indent=2) + "\n"
-        )
+        backup = backup_installation(root, plugins, marketplace)
     try:
         # Removing the plugin alone leaves the conflicting marketplace registration.
         for plugin in plugins:
@@ -314,6 +484,17 @@ def install(root: Path, bundle: Path) -> None:
                 codex(root, "marketplace", "add", str(backup / "marketplace"))
                 for plugin in plugins:
                     codex(root, "add", plugin["pluginId"])
+                    if not plugin["enabled"]:
+                        set_enabled(root, plugin["pluginId"], False)
+                restored, _ = inventory(root)
+                if [(p["version"], p["enabled"]) for p in restored] != [
+                    (p["version"], p["enabled"]) for p in plugins
+                ]:
+                    raise UpdateError("Restored plugin version or enabled state does not match")
+                if restored and package_contents(
+                    installed_package(restored[0])
+                ) != package_contents(backup / "marketplace/plugin"):
+                    raise UpdateError("Restored plugin files do not match the installed backup")
                 print(f"Restored the previous files from a local backup: {backup}", file=sys.stderr)
         except (Exception, KeyboardInterrupt) as rollback_error:
             print(

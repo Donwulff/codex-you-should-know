@@ -206,6 +206,176 @@ class BackendTests(unittest.TestCase):
         )
         self.assertEqual(review("test", self.schema, timeout=5), {"finding": None})
 
+    def test_stderr_rate_limit_stops_review_and_preserves_safe_retry_details(self) -> None:
+        secret = f"private-{self.root.name}"
+        self.cli(
+            f"""
+            print('{{"type":"turn.started"}}', flush=True)
+            sys.stderr.write('WARN codex_core::responses_retry: stream disconnected - ')
+            sys.stderr.flush()
+            time.sleep(0.05)
+            sys.stderr.write('retrying sampling request (1/5 in 359.999736269s)... '
+                             'sampling_error=exceeded retry limit, last status: '
+                             '429 Too Many Requests; {secret}\\n')
+            sys.stderr.flush()
+            time.sleep(30)
+            """
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(BackendError, "usage or rate limit") as raised:
+            review("test", self.schema, timeout=5)
+        self.assertLess(time.monotonic() - started, 3)
+        diagnostics = raised.exception.diagnostics
+        self.assertEqual(diagnostics["category"], "rate_limit")
+        self.assertEqual(diagnostics["stage"], "turn_started")
+        self.assertEqual(diagnostics["timeout_seconds"], 5)
+        self.assertAlmostEqual(diagnostics["retry_after_seconds"], 359.999736269)
+        self.assertNotIn(secret, str(raised.exception) + json.dumps(diagnostics))
+
+    def test_timeout_reports_effective_budget_and_last_lifecycle_stage(self) -> None:
+        self.cli(
+            """
+            print('{"type":"turn.started"}', flush=True)
+            time.sleep(30)
+            """
+        )
+        with self.assertRaisesRegex(BackendError, "timed out") as raised:
+            review("test", self.schema, timeout=0.5)
+        self.assertEqual(
+            raised.exception.diagnostics,
+            {"category": "timeout", "stage": "turn_started", "timeout_seconds": 0.5},
+        )
+
+    def test_rate_limit_events_stop_before_cli_retry_and_preserve_reported_usage(self) -> None:
+        for event_type in ("error", "turn.failed"):
+            with self.subTest(event_type=event_type):
+                failure = {"message": "HTTP 429 Too Many Requests; Retry-After: 200"}
+                event = {"type": event_type}
+                event.update({"error": failure} if event_type == "turn.failed" else failure)
+                self.cli(
+                    f"""
+                    print(json.dumps({{'type': 'turn.completed', 'usage': {{
+                        'input_tokens': 123, 'output_tokens': 45
+                    }}}}), flush=True)
+                    print({json.dumps(event)!r}, flush=True)
+                    time.sleep(30)
+                    """
+                )
+                started = time.monotonic()
+                with self.assertRaisesRegex(BackendError, "usage or rate limit") as raised:
+                    review("test", self.schema, timeout=5)
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertEqual(raised.exception.usage, {"input_tokens": 123, "output_tokens": 45})
+                self.assertEqual(raised.exception.diagnostics["category"], "rate_limit")
+                self.assertEqual(raised.exception.diagnostics["retry_after_seconds"], 200)
+
+    def test_stderr_rate_limit_retry_delays_are_bounded(self) -> None:
+        for retry, expected in (("0", 1), ("401.25", 401.25), ("7200", 3600), ("9" * 400, None)):
+            with self.subTest(retry=retry):
+                message = (
+                    "2026-10-28T13:22:44.401Z WARN codex_core::responses_retry: "
+                    f"retrying sampling request (1/5 in {retry}s)... "
+                    "last status: 429 Too Many Requests"
+                )
+                self.cli(f"print({message!r}, file=sys.stderr, flush=True)\ntime.sleep(30)")
+                with self.assertRaisesRegex(BackendError, "usage or rate limit") as raised:
+                    review("test", self.schema, timeout=5)
+                self.assertEqual(raised.exception.diagnostics.get("retry_after_seconds"), expected)
+
+    def test_benign_stderr_and_quoted_rate_limit_text_do_not_prevent_success(self) -> None:
+        secret = f"private-{self.root.name}"
+        for message in (
+            f"Processed 429 objects: {secret}",
+            f"WARN codex_core::config: processed 429 objects: {secret}",
+            '"WARN codex_core::responses_retry: last status: 429 Too Many Requests"',
+            "USER: example error: 429 Too Many Requests",
+            "USER: WARN codex_core::responses_retry: last status: 429 Too Many Requests",
+            "WARN codex_core::config: unknown feature flag rate_limit",
+        ):
+            with self.subTest(message=message):
+                self.cli(
+                    f"""
+                    print({message!r}, file=sys.stderr)
+                    print('{{"type":"turn.completed"}}')
+                    out.write_text('{{"finding":null}}')
+                    """
+                )
+                self.assertEqual(review("test", self.schema, timeout=5), {"finding": None})
+
+    def test_split_stderr_retry_delay_is_parsed_only_after_line_finishes(self) -> None:
+        self.cli(
+            """
+            sys.stderr.write('WARN codex_core::responses_retry: '
+                             'last status: 429 Too Many Requests; Retry-After: 3')
+            sys.stderr.flush()
+            time.sleep(0.05)
+            sys.stderr.write('60\\n')
+            sys.stderr.flush()
+            time.sleep(30)
+            """
+        )
+        with self.assertRaisesRegex(BackendError, "usage or rate limit") as raised:
+            review("test", self.schema, timeout=5)
+        self.assertEqual(raised.exception.diagnostics["retry_after_seconds"], 360)
+
+    def test_unterminated_stderr_is_classified_at_eof_or_deadline(self) -> None:
+        for finish in ("exit", "stall"):
+            with self.subTest(finish=finish):
+                self.cli(
+                    f"""
+                    sys.stderr.write('WARN codex_core::responses_retry: '
+                                     'last status: 429 Too Many Requests; Retry-After: 3')
+                    sys.stderr.flush()
+                    time.sleep(0.05)
+                    sys.stderr.write('60')
+                    sys.stderr.flush()
+                    if {finish!r} == 'stall':
+                        time.sleep(30)
+                    """
+                )
+                started = time.monotonic()
+                with self.assertRaisesRegex(BackendError, "usage or rate limit") as raised:
+                    review("test", self.schema, timeout=0.5)
+                if finish == "stall":
+                    self.assertGreaterEqual(time.monotonic() - started, 0.4)
+                self.assertEqual(raised.exception.diagnostics["retry_after_seconds"], 360)
+
+    def test_stderr_accepts_explicit_http_status_and_structured_retry_errors(self) -> None:
+        for message in (
+            "ERROR codex_core::client: request failed with HTTP 429",
+            "WARN codex_core::responses_retry: stream disconnected - "
+            "retrying sampling request (1/5 in 401.25s)... sampling_error=usage_limit_reached",
+        ):
+            with self.subTest(message=message):
+                self.cli(f"print({message!r}, file=sys.stderr, flush=True)\ntime.sleep(30)")
+                with self.assertRaisesRegex(BackendError, "usage or rate limit") as raised:
+                    review("test", self.schema, timeout=5)
+                self.assertEqual(raised.exception.diagnostics["category"], "rate_limit")
+
+    def test_json_error_numbers_do_not_act_as_status_codes(self) -> None:
+        for message, category in (
+            ("request took 401.25 seconds; connection timed out", "connection"),
+            ("request number 429 failed", "unknown"),
+        ):
+            with self.subTest(message=message):
+                event = {"type": "turn.failed", "error": {"message": message}}
+                self.cli(f"print({json.dumps(event)!r})")
+                with self.assertRaises(BackendError) as raised:
+                    review("test", self.schema, timeout=5)
+                self.assertEqual(raised.exception.diagnostics["category"], category)
+
+    def test_completed_turn_with_lingering_process_is_still_bounded(self) -> None:
+        self.cli(
+            """
+            print('{"type":"turn.completed","usage":{"output_tokens":7}}', flush=True)
+            time.sleep(30)
+            """
+        )
+        with self.assertRaisesRegex(BackendError, "timed out") as raised:
+            review("test", self.schema, timeout=0.5)
+        self.assertEqual(raised.exception.diagnostics["stage"], "turn_completed")
+        self.assertEqual(raised.exception.usage, {"output_tokens": 7})
+
     def test_terminal_errors_classify_cause_without_exposing_message(self) -> None:
         cases = (
             ("401 Unauthorized; private-auth-canary", "authentication failed"),

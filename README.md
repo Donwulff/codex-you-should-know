@@ -363,9 +363,9 @@ files while a standalone Codex CLI process owned by your user is running. It
 ignores persistent `codex app-server` services and `codex-code-mode-host`, which can
 remain after the app closes. It cannot detect whether an app chat window is open.
 
-The ordinary test suite stubs reviewer calls. Native Codex discovery testing is
-opt-in: `YSK_TEST_NATIVE_CODEX=1` enables a test that temporarily installs the plugin
-under an isolated `CODEX_HOME`. No test makes a reviewer model call.
+The ordinary test suite stubs reviewer calls. Native Codex tests are opt-in:
+`YSK_TEST_NATIVE_CODEX=1` enables discovery, development installation, and rollback
+tests under isolated `CODEX_HOME` directories. No test makes a reviewer model call.
 
 ```sh
 YSK_TEST_NATIVE_CODEX=1 uv --no-config run pytest tests/test_package.py -k codex_discovers_all_installed_hooks

@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Give end-of-turn reviews the full remaining check deadline instead of halving it. Defer confirmation when too little time remains, and retain candidates after reviewer timeouts, rate limits, or recognized connection failures.
+- Detect reviewer rate limits in JSON events and recognized stderr errors, stop the affected request, and persist a bounded retry delay shared by automatic checks using the same model. Explicit manual checks can still probe recovery.
+
 ### Added
 
+- Added `scripts/dev_update.py` to merge upstream changes, preserve local edits, validate the checkout, and install a versioned development bundle. Failed installations restore a snapshot of the previously installed package and its enabled state; `--prepare-only` validates and builds without changing the installed plugin.
+- Include sanitized reviewer failure categories, subprocess stages, timeout budgets, and recognized retry delays in check diagnostics. Show active model pauses in `status` under `reviewer_backoff`.
 - Add `notes --cwd` and `status --cwd` to inspect one session working directory, including scoped check history, totals, model usage, transcript diagnostics, hook sightings, warnings, and mutes.
 - Show compact pending candidates alongside published notes. `notes --all` includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit stored transcripts and evidence and do not trigger reviewer calls.
 - Add `status --limit` and `status --skipped`. Recent check history hides skipped checks by default while totals retain them. New check records link to compact candidate and note summaries; legacy associations remain unknown.

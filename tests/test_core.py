@@ -222,7 +222,7 @@ def test_manual_check_saves_validated_note_and_survives_reopen(
         assert schema_path.is_file()
         assert model == "session-model"
         if schema_path.name == "finding.schema.json":
-            assert 44 < timeout <= 45
+            assert 89 < timeout <= 90
         else:
             assert 0 < timeout <= 90
         return finding_response(finding, schema_path)
