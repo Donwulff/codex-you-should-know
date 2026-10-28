@@ -584,3 +584,163 @@ def test_error_usage_totals_distinguish_known_usage_from_unknown(
     assert status["output_tokens"] == (45 if reported else 0)
     assert status["model_calls"] == 1
     assert status["usage_unknown_calls"] == (0 if reported else 1)
+
+
+def test_stop_review_can_complete_after_half_the_budget(state, transcript, monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+
+    def reviewer(*args, timeout, **kwargs):
+        now[0] += min(70, timeout)
+        if timeout < 70:
+            raise backend.BackendError("Codex review timed out")
+        return {"finding": None}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    result = cli.check(state, Config(), "s", transcript, "Stop")
+    assert result["status"] == "clear"
+    assert result["latency"] == 70
+    assert state.diagnostics()["model_calls"] == 1
+
+
+def test_slow_stop_review_retains_candidate_for_later_confirmation(
+    state, transcript, finding, monkeypatch
+):
+    now = [0.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now[0])
+    calls = []
+
+    def reviewer(prompt, schema, **kwargs):
+        calls.append(schema.name)
+        if schema.name == "finding.schema.json":
+            now[0] += 85
+            return response(finding)
+        return {"confirmed": True, "reason": "Still unresolved", "evidence": finding.evidence}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    result = cli.check(state, Config(), "s", transcript, "Stop")
+    assert result["status"] == "pending"
+    assert result["reason"] == "insufficient time for confirmation"
+    assert calls == ["finding.schema.json"]
+    assert state.notes() == []
+    assert state.pending_candidate("s") is not None
+    result = cli.check(state, Config(), "s", transcript, "Stop")
+    assert result["status"] == "finding"
+    assert calls == ["finding.schema.json", "confirmation.schema.json"]
+
+
+def test_reviewer_rate_limit_pauses_same_model_across_sessions_and_recovers(
+    state, transcript, monkeypatch, capsys
+):
+    now = [1000.0]
+    monkeypatch.setattr(cli.time, "time", lambda: now[0])
+    calls = []
+
+    def reviewer(*args, model, **kwargs):
+        calls.append(model)
+        if len(calls) == 1:
+            error = backend.BackendError("Codex usage or rate limit reached")
+            error.diagnostics = {
+                "category": "rate_limit",
+                "retry_after_seconds": 360,
+                "stage": "turn_started",
+                "timeout_seconds": 90,
+            }
+            raise error
+        return {"finding": None}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    assert cli.check(state, Config(), "one", transcript, "Stop", "limited")["status"] == "error"
+    for event in ("Stop", "PostToolUse"):
+        result = cli.check(
+            state, replace(Config(), every_n_tools=1), event, transcript, event, "limited"
+        )
+        assert (result["status"], result["reason"]) == ("skipped", "reviewer rate limit backoff")
+        assert state.session(event).attempts == 0
+    assert cli.check(state, Config(), "other", transcript, "Stop", "other")["status"] == "clear"
+    assert calls == ["limited", "other"]
+    assert cli.main(["--data-dir", str(state.directory), "status"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["reviewer_backoff"] == [{"model": "limited", "retry_at": 1360.0}]
+    failure = next(row for row in status["recent_checks"] if row["outcome"] == "error")
+    assert failure["diagnostics"]["backend"]["stage"] == "turn_started"
+    reopened = State(state.directory)
+    try:
+        assert reopened.reviewer_retry_at("limited") == 1360
+    finally:
+        reopened.close()
+    now[0] = 1360
+    assert cli.check(state, Config(), "one", transcript, "Stop", "limited")["status"] == "clear"
+    assert calls == ["limited", "other", "limited"]
+
+
+@pytest.mark.parametrize("category", ["rate_limit", "timeout", "connection"])
+def test_transient_confirmation_failure_retains_candidate(
+    state, transcript, finding, monkeypatch, category
+):
+    now = [1000.0]
+    monkeypatch.setattr(cli.time, "time", lambda: now[0])
+    calls = []
+
+    def reviewer(prompt, schema, **kwargs):
+        calls.append(schema.name)
+        if len(calls) == 1:
+            return response(finding)
+        if len(calls) == 2:
+            error = backend.BackendError("Transient reviewer failure")
+            error.diagnostics = {"category": category}
+            raise error
+        return {"confirmed": True, "reason": "Still unresolved", "evidence": finding.evidence}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    assert cli.check(state, Config(), "s", transcript, "Stop", "limited")["status"] == "error"
+    assert state.notes() == []
+    candidate = state.pending_candidate("s")
+    assert candidate is not None
+    if category == "rate_limit":
+        assert state.reviewer_retry_at("limited") == 1300
+        assert cli.check(state, Config(), "s", transcript, "Stop", "limited")["status"] == "pending"
+        assert len(calls) == 2
+    now[0] = 1300
+    assert cli.check(state, Config(), "s", transcript, "Stop", "limited")["status"] == "finding"
+    assert calls == ["finding.schema.json", "confirmation.schema.json", "confirmation.schema.json"]
+
+
+def test_explicit_check_can_probe_during_model_backoff(state, transcript, monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    state.defer_reviewer("configured", now)
+    config = replace(Config(), model="configured")
+    result = cli.check(state, config, "auto", transcript, "Stop", "hook-model")
+    assert result["status"] == "skipped"
+    calls = []
+
+    def reviewer(*args, model, **kwargs):
+        calls.append(model)
+        return {"finding": None}
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    result = cli.check(state, config, "manual", transcript, "Stop", "hook-model", force=True)
+    assert result["status"] == "clear"
+    assert calls == ["configured"]
+    assert state.reviewer_retry_at("configured") == 1300
+
+
+def test_new_rate_limit_before_confirmation_defers_without_call(
+    state, transcript, finding, monkeypatch
+):
+    now = 1000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    calls = []
+
+    def reviewer(prompt, schema, **kwargs):
+        calls.append(schema.name)
+        state.defer_reviewer("limited", now)
+        return response(finding)
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    result = cli.check(state, Config(), "s", transcript, "Stop", "limited")
+    assert (result["status"], result["reason"]) == ("pending", "reviewer rate limit backoff")
+    assert calls == ["finding.schema.json"]
+    assert state.pending_candidate("s") is not None
+    assert state.notes() == []

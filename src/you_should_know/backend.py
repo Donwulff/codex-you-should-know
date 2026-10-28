@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -77,9 +78,16 @@ _CONFIG = (
 class BackendError(RuntimeError):
     """A bounded, non-sensitive error safe to show in hook diagnostics."""
 
-    def __init__(self, message: str, *, usage: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: dict[str, int] | None = None,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.usage = dict(usage or {})
+        self.diagnostics = dict(diagnostics or {})
 
 
 class ReviewResponse(dict[str, Any]):
@@ -101,31 +109,45 @@ def _stop(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
-def _failure(error: object) -> str:
+def _failure(error: object) -> BackendError:
     message = error.get("message", "") if isinstance(error, dict) else ""
     message = message.lower() if isinstance(message, str) else ""
+    status = re.search(r"\b(?:http|status(?: code)?)\s*[:=]?\s*(401|429)\b", message)
     categories = (
         (
-            ("unauthorized", "authentication", "invalid_api_key", "401", "token could not"),
+            "authentication",
+            ("unauthorized", "authentication", "invalid_api_key", "token could not"),
             "Codex authentication failed; run `codex login` before another check",
         ),
         (
-            ("rate limit", "rate_limit", "usage limit", "usage_limit", "quota", "429"),
+            "rate_limit",
+            (
+                "rate limit",
+                "rate_limit",
+                "usage limit",
+                "usage_limit",
+                "quota",
+                "too many requests",
+            ),
             "Codex usage or rate limit reached; wait for the limit to reset",
         ),
         (
+            "model_unavailable",
             ("model_not_found", "model is not supported", "model does not exist"),
             "Codex reviewer model is unavailable; choose an available model in settings",
         ),
         (
+            "schema",
             ("invalid_json_schema", "invalid schema", "response_format"),
             "Codex rejected the review schema; check plugin and model compatibility",
         ),
         (
+            "context_limit",
             ("context_length_exceeded", "context length", "maximum context"),
             "Codex review exceeds the model context limit; reduce max_context_chars",
         ),
         (
+            "connection",
             (
                 "stream disconnected",
                 "reconnect",
@@ -139,13 +161,59 @@ def _failure(error: object) -> str:
             "Codex connection failed; check network and service availability",
         ),
     )
-    for needles, diagnostic in categories:
-        if any(needle in message for needle in needles):
-            return diagnostic
-    return "Codex review failed without a recognized cause; check Codex CLI diagnostics"
+    for category, needles, diagnostic in categories:
+        expected_status = {"authentication": "401", "rate_limit": "429"}.get(category)
+        if (
+            status.group(1) == expected_status
+            if status
+            else any(needle in message for needle in needles)
+        ):
+            details: dict[str, Any] = {"category": category}
+            if category == "rate_limit":
+                retry = re.search(
+                    r"retrying sampling request \(\d+/\d+ in (\d+(?:\.\d+)?)s\)"
+                    r"|retry[-_ ]after[:= ]+(\d+(?:\.\d+)?)(?=$|[\s;,])",
+                    message,
+                )
+                if retry:
+                    seconds = float(retry.group(1) or retry.group(2))
+                    if math.isfinite(seconds):
+                        details["retry_after_seconds"] = min(3600.0, max(1.0, seconds))
+            return BackendError(diagnostic, diagnostics=details)
+    return BackendError(
+        "Codex review failed without a recognized cause; check Codex CLI diagnostics",
+        diagnostics={"category": "unknown"},
+    )
 
 
-def _event(line: bytes, usage: dict[str, int] | None = None) -> tuple[bool, str | None]:
+def _stderr_failure(line: bytes) -> BackendError | None:
+    message = line.decode("utf-8", errors="replace").strip()
+    logged = re.match(
+        r"^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+        r"(?:Z|[+-]\d{2}:\d{2})\s+)?(?:WARN|ERROR)\s+(codex_[\w:]+):\s+(.*)$",
+        message,
+    )
+    if not logged:
+        return None
+    target, message = logged.groups()
+    explicit_status = re.search(
+        r"\b429\s+Too Many Requests\b|\b(?:HTTP|status(?: code)?)\s*[:=]?\s*429\b",
+        message,
+        re.IGNORECASE,
+    )
+    structured_limit = target == "codex_core::responses_retry" and re.search(
+        r"\bsampling_error=.*\b(?:rate|usage)_limit(?:_[a-z]+)*\b", message, re.IGNORECASE
+    )
+    if not explicit_status and not structured_limit:
+        return None
+    return _failure({"message": message})
+
+
+def _event(
+    line: bytes,
+    usage: dict[str, int] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> tuple[bool, BackendError | None]:
     try:
         event = json.loads(line)
     except (UnicodeError, ValueError) as exc:
@@ -153,11 +221,24 @@ def _event(line: bytes, usage: dict[str, int] | None = None) -> tuple[bool, str 
     if not isinstance(event, dict):
         raise BackendError("Codex returned an invalid event stream")
     kind = event.get("type")
+    stages = {
+        "thread.started": "thread_started",
+        "turn.started": "turn_started",
+        "item.started": "responding",
+        "item.updated": "responding",
+        "item.completed": "responding",
+        "turn.completed": "turn_completed",
+    }
+    if diagnostics is not None and kind in stages:
+        diagnostics["stage"] = stages[kind]
     if kind == "turn.failed":
-        raise BackendError(_failure(event.get("error")))
+        raise _failure(event.get("error"))
     if kind == "error":
+        failure = _failure(event)
+        if failure.diagnostics["category"] == "rate_limit":
+            raise failure
         # Codex keeps running after error notifications and may recover before turn.completed.
-        return False, _failure(event)
+        return False, failure
     if kind in {"item.started", "item.updated", "item.completed"}:
         item = event.get("item")
         if not isinstance(item, dict):
@@ -181,10 +262,12 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
     environment = {key: value for key, value in os.environ.items() if key in _ENVIRONMENT}
     environment["YSK_REVIEWER_ACTIVE"] = "1"
     pending = bytearray()
+    stderr_pending = bytearray()
     total = 0
     completed = False
     last_error = None
     usage: dict[str, int] = {}
+    diagnostics: dict[str, Any] = {"stage": "starting", "timeout_seconds": timeout}
     deadline = time.monotonic() + timeout
     with tempfile.TemporaryFile() as input_file:
         input_file.write(prompt)
@@ -200,7 +283,10 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
                 start_new_session=True,
             )
         except OSError as exc:
-            raise BackendError("Could not start Codex CLI") from exc
+            raise BackendError(
+                "Could not start Codex CLI", diagnostics={**diagnostics, "category": "startup"}
+            ) from exc
+        diagnostics["stage"] = "process_started"
         previous_sigterm = None
         if threading.current_thread() is threading.main_thread():
             previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
@@ -213,12 +299,22 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
                 while selector.get_map():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
+                        failure = _stderr_failure(bytes(stderr_pending))
+                        if failure is not None:
+                            raise failure
                         detail = f". {last_error}" if last_error else ""
-                        raise BackendError(f"Codex review timed out{detail}")
+                        raise BackendError(
+                            f"Codex review timed out{detail}", diagnostics={"category": "timeout"}
+                        )
                     for key, _ in selector.select(min(remaining, 0.2)):
                         chunk = os.read(key.fd, 65_536)
                         if not chunk:
                             selector.unregister(key.fileobj)
+                            if not key.data:
+                                failure = _stderr_failure(bytes(stderr_pending))
+                                stderr_pending.clear()
+                                if failure is not None:
+                                    raise failure
                             continue
                         total += len(chunk)
                         if total > MAX_OUTPUT_BYTES:
@@ -229,25 +325,44 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
                                 line, _, rest = pending.partition(b"\n")
                                 pending = bytearray(rest)
                                 if line.strip():
-                                    finished, diagnostic = _event(bytes(line), usage)
+                                    finished, diagnostic = _event(bytes(line), usage, diagnostics)
                                     completed = finished or completed
                                     last_error = diagnostic or last_error
+                        else:
+                            stderr_pending.extend(chunk)
+                            if b"\n" not in chunk:
+                                continue
+                            lines = stderr_pending.split(b"\n")
+                            stderr_pending = bytearray(lines.pop())
+                            for line in lines:
+                                failure = _stderr_failure(bytes(line))
+                                if failure is not None:
+                                    raise failure
                 if pending.strip():
-                    finished, diagnostic = _event(bytes(pending), usage)
+                    finished, diagnostic = _event(bytes(pending), usage, diagnostics)
                     completed = finished or completed
                     last_error = diagnostic or last_error
+                diagnostics["stage"] = "process_exit"
                 try:
                     return_code = process.wait(timeout=max(0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired as exc:
-                    raise BackendError("Codex review timed out") from exc
+                    raise BackendError(
+                        "Codex review timed out", diagnostics={"category": "timeout"}
+                    ) from exc
                 if return_code:
                     if last_error:
-                        raise BackendError(f"{last_error} (CLI status {return_code})")
+                        raise BackendError(
+                            f"{last_error} (CLI status {return_code})",
+                            diagnostics=last_error.diagnostics,
+                        )
                     raise BackendError(f"Codex CLI exited with status {return_code}")
                 if not completed:
-                    raise BackendError(last_error or "Codex did not complete the review")
+                    raise last_error or BackendError("Codex did not complete the review")
         except BackendError as error:
             error.usage = dict(usage)
+            error.diagnostics = {"category": "process", **diagnostics, **error.diagnostics}
+            if last_error:
+                error.diagnostics["last_error_category"] = last_error.diagnostics["category"]
             raise
         finally:
             try:
@@ -272,7 +387,14 @@ def review(
         raise BackendError("Review prompt is empty or exceeds its size limit")
     executable = shutil.which("codex")
     if not executable:
-        raise BackendError("Codex CLI was not found on PATH")
+        raise BackendError(
+            "Codex CLI was not found on PATH",
+            diagnostics={
+                "category": "executable_unavailable",
+                "stage": "starting",
+                "timeout_seconds": timeout,
+            },
+        )
     try:
         schema = schema_path.resolve(strict=True)
     except OSError as exc:
@@ -308,14 +430,21 @@ def review(
             command.extend(("--model", model))
         command.append("-")
         usage = _run(command, encoded, workspace, timeout)
+        diagnostics = {"category": "result", "stage": "result", "timeout_seconds": timeout}
         try:
             with output.open("rb") as result_file:
                 raw = result_file.read(MAX_RESULT_BYTES + 1)
             if len(raw) > MAX_RESULT_BYTES:
-                raise BackendError("Codex review exceeded its result limit", usage=usage)
+                raise BackendError(
+                    "Codex review exceeded its result limit", usage=usage, diagnostics=diagnostics
+                )
             result = json.loads(raw)
         except (OSError, UnicodeError, ValueError) as exc:
-            raise BackendError("Codex returned no valid JSON review", usage=usage) from exc
+            raise BackendError(
+                "Codex returned no valid JSON review", usage=usage, diagnostics=diagnostics
+            ) from exc
         if not isinstance(result, dict):
-            raise BackendError("Codex review must be a JSON object", usage=usage)
+            raise BackendError(
+                "Codex review must be a JSON object", usage=usage, diagnostics=diagnostics
+            )
         return ReviewResponse(result, usage)

@@ -1,7 +1,79 @@
+import fcntl
 import json
+import os
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
-from you_should_know.state import State
+import pytest
+
+from you_should_know import state as state_module
+from you_should_know.state import State, review_lock
+
+
+@pytest.mark.parametrize("wait", [0, 0.05])
+def test_active_pruning_cannot_block_review_past_deadline(tmp_path, wait):
+    with (tmp_path / ".review-prune.lock").open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys\nfrom pathlib import Path\n"
+                "from you_should_know.state import review_lock\n"
+                "with review_lock(Path(sys.argv[1]), 's', float(sys.argv[2])) as acquired:\n"
+                "    print(acquired)\n",
+                str(tmp_path),
+                str(wait),
+            ],
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=True,
+        )
+        assert result.stdout.strip() == "False"
+
+
+def test_prune_and_session_lock_share_one_wait_budget(tmp_path, monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(state_module.time, "monotonic", lambda: now[0])
+
+    def sleep(delay):
+        now[0] += delay
+
+    def flock(descriptor, operation):
+        if operation & fcntl.LOCK_SH and now[0] >= 0.1:
+            return
+        raise BlockingIOError
+
+    monkeypatch.setattr(state_module.time, "sleep", sleep)
+    monkeypatch.setattr(state_module.fcntl, "flock", flock)
+    with review_lock(tmp_path, "s", 0.2) as acquired:
+        assert not acquired
+    assert now[0] == pytest.approx(0.2)
+
+
+def test_model_backoff_survives_reopen_and_never_shortens(tmp_path, monkeypatch):
+    monkeypatch.setattr("you_should_know.state.time.time", lambda: 1000)
+    first = State(tmp_path)
+    second = State(tmp_path)
+    try:
+        first.defer_reviewer("model", 1000, 360)
+        second.defer_reviewer("model", 1000, 120)
+        second.defer_reviewer(None, 1000)
+        assert first.reviewer_retry_at("model") == 1360
+        assert first.reviewer_retry_at(None) == 1300
+        assert first.reviewer_retry_at("another-model") == 0
+        assert first.prune(30, 1300)["reviewer_backoff"] == 1
+        assert second.reviewer_retry_at(None) == 0
+        assert second.reviewer_retry_at("model") == 1360
+        assert second.prune(30, 1360)["reviewer_backoff"] == 1
+        assert first.reviewer_retry_at("model") == 0
+    finally:
+        first.close()
+        second.close()
 
 
 def test_check_diagnostics_survive_restart_as_structured_data(tmp_path):

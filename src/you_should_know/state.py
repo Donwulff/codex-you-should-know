@@ -157,6 +157,10 @@ class State:
                 session_id TEXT PRIMARY KEY,
                 last_failure REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS reviewer_backoff (
+                model TEXT PRIMARY KEY,
+                retry_at REAL NOT NULL
+            );
         """)
         with self._transaction():
             columns = self.connection.execute("PRAGMA table_info(interactions)").fetchall()
@@ -345,6 +349,21 @@ class State:
             (session_id, now - 3600),
         ).fetchone()[0]
         return recent < config.max_checks_per_hour
+
+    def reviewer_retry_at(self, model: str | None) -> float:
+        row = self.connection.execute(
+            "SELECT retry_at FROM reviewer_backoff WHERE model = ?", (model or "",)
+        ).fetchone()
+        return row["retry_at"] if row else 0.0
+
+    def defer_reviewer(self, model: str | None, now: float, delay: float = 300) -> None:
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO reviewer_backoff(model, retry_at) VALUES (?, ?) "
+                "ON CONFLICT(model) DO UPDATE SET retry_at = "
+                "max(reviewer_backoff.retry_at, excluded.retry_at)",
+                (model or "", now + max(1, min(3600, delay))),
+            )
 
     def notice_once(self, session_id: str, key: str) -> bool:
         with self.connection:
@@ -896,6 +915,14 @@ class State:
                 )
         return {
             "candidates": counts,
+            "reviewer_backoff": [
+                {"model": row["model"] or None, "retry_at": row["retry_at"]}
+                for row in self.connection.execute(
+                    "SELECT model, retry_at FROM reviewer_backoff WHERE retry_at > ? "
+                    "ORDER BY model",
+                    (time.time(),),
+                )
+            ],
             "candidate_reasons": reasons,
             "recent_checks": recent_checks("1" if include_skipped else "outcome != 'skipped'"),
             "recent_transcript_errors": recent_checks(
@@ -973,6 +1000,9 @@ class State:
                     "DELETE FROM transcript_retries WHERE session_id NOT IN "
                     "(SELECT session_id FROM sessions)"
                 ).rowcount
+                removed["reviewer_backoff"] = self.connection.execute(
+                    "DELETE FROM reviewer_backoff WHERE retry_at <= ?", (now,)
+                ).rowcount
                 removed["hook_events"] = self.connection.execute(
                     "DELETE FROM hook_events WHERE seen_at < ?", (cutoff,)
                 ).rowcount
@@ -1015,15 +1045,22 @@ class State:
 
 
 @contextlib.contextmanager
-def _prune_guard(directory: Path, exclusive: bool = False) -> Generator[bool]:
+def _prune_guard(
+    directory: Path, exclusive: bool = False, *, deadline: float | None = None
+) -> Generator[bool]:
     descriptor = os.open(directory / ".review-prune.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        operation = fcntl.LOCK_EX | fcntl.LOCK_NB if exclusive else fcntl.LOCK_SH
-        try:
-            fcntl.flock(descriptor, operation)
-        except BlockingIOError:
-            yield False
-            return
+        operation = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+        while True:
+            try:
+                fcntl.flock(descriptor, operation)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic() if deadline is not None else 0
+                if remaining <= 0:
+                    yield False
+                    return
+                time.sleep(min(0.05, remaining))
         yield True
     finally:
         os.close(descriptor)
@@ -1031,10 +1068,13 @@ def _prune_guard(directory: Path, exclusive: bool = False) -> Generator[bool]:
 
 @contextlib.contextmanager
 def review_lock(directory: Path, session_id: str, wait_seconds: float = 0) -> Generator[bool]:
-    with _prune_guard(directory):
+    deadline = time.monotonic() + wait_seconds
+    with _prune_guard(directory, deadline=deadline) as acquired:
+        if not acquired:
+            yield False
+            return
         key = hashlib.sha256(session_id.encode()).hexdigest()
         descriptor = os.open(directory / f"review-{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        deadline = time.monotonic() + wait_seconds
         try:
             while True:
                 try:

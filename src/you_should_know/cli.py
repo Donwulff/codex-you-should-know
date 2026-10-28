@@ -196,6 +196,14 @@ def check(
             )
         return outcome("pending", reason, candidate_id=candidate["id"])
 
+    def backoff(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+        retry_at = state.reviewer_retry_at(selected_model)
+        if force or retry_at <= time.time():
+            return None
+        diagnostics["reviewer_backoff"] = {"model": selected_model, "retry_at": retry_at}
+        reason = "reviewer rate limit backoff"
+        return hold(candidate, reason) if candidate else outcome("skipped", reason)
+
     if not config.enabled or state.muted(session_id, session.cwd):
         return outcome("skipped", "disabled or muted")
     if event == "Stop" and not force and not config.final_check:
@@ -209,12 +217,15 @@ def check(
         if not budget():
             return outcome("skipped", "budget exhausted")
         return outcome("skipped", "cadence or cooldown")
-    wait = config.timeout_seconds + 2 if event == "Stop" and not force else 0
+    wait = max(0, deadline - time.monotonic()) if event == "Stop" and not force else 0
     with review_lock(state.directory, session_id, wait) as acquired:
         if not acquired:
             return outcome("skipped", "review is busy")
         session = state.session(session_id)
         candidate = state.pending_candidate(session_id)
+        deferred = backoff(candidate)
+        if deferred:
+            return deferred
         if not (candidate and event == "Stop") and not eligible(
             session, config, event, time.time(), force
         ):
@@ -260,13 +271,16 @@ def check(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return outcome("skipped", "check time limit reached")
+                deferred = backoff(None)
+                if deferred:
+                    return deferred
                 state.begin(session_id, time.time())
                 model_called = True
                 response = backend.review(
                     prompt,
                     SCHEMA,
                     model=selected_model,
-                    timeout=remaining / 2 if event == "Stop" else remaining,
+                    timeout=remaining,
                 )
                 usage = getattr(response, "usage", {})
                 suppressed: list[dict] = []
@@ -332,6 +346,11 @@ def check(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return hold(candidate, "check time limit reached")
+            if remaining < min(10, config.timeout_seconds / 2):
+                return hold(candidate, "insufficient time for confirmation")
+            deferred = backoff(candidate)
+            if deferred:
+                return deferred
             state.begin(session_id, time.time())
             model_called = True
             confirming = True
@@ -372,11 +391,23 @@ def check(
         except (backend.BackendError, AssessmentError, TranscriptError) as error:
             usage = getattr(error, "usage", usage)
             detail = str(error)[:500]
+            transient = False
+            if isinstance(error, backend.BackendError):
+                backend_diagnostics = getattr(error, "diagnostics", {})
+                diagnostics["backend"] = backend_diagnostics
+                category = backend_diagnostics.get("category")
+                transient = category in {"rate_limit", "timeout", "connection"}
+                if category == "rate_limit":
+                    state.defer_reviewer(
+                        selected_model,
+                        time.time(),
+                        backend_diagnostics.get("retry_after_seconds", 300),
+                    )
             if isinstance(error, AssessmentError):
                 rejected = evidence_diagnostics(response, evidence_transcript, detail)
                 if rejected is not None:
                     diagnostics["evidence_rejection"] = rejected
-            if candidate and confirming:
+            if candidate and confirming and not transient:
                 state.resolve_candidate(
                     candidate["id"], "withdrawn", f"Confirmation failed: {detail}", time.time()
                 )
