@@ -253,6 +253,8 @@ def inventory(root: Path) -> tuple[list[dict], dict | None]:
     copies = [p for p in plugins if p["name"] == NAME]
     if any(p["marketplaceName"] != NAME for p in copies):
         raise UpdateError("YSK is also installed from another marketplace; remove that copy first.")
+    if any(not isinstance(p.get("enabled"), bool) for p in copies):
+        raise UpdateError("Installed YSK enablement is unavailable; leaving it intact.")
     marketplace = next((m for m in marketplaces if m["name"] == NAME), None)
     if copies and not marketplace:
         raise UpdateError(

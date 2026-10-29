@@ -84,10 +84,12 @@ class BackendError(RuntimeError):
         *,
         usage: dict[str, int] | None = None,
         diagnostics: dict[str, Any] | None = None,
+        process_started: bool = True,
     ) -> None:
         super().__init__(message)
         self.usage = dict(usage or {})
         self.diagnostics = dict(diagnostics or {})
+        self.process_started = process_started
 
 
 class ReviewResponse(dict[str, Any]):
@@ -284,7 +286,16 @@ def _run(command: list[str], prompt: bytes, workspace: Path, timeout: float) -> 
             )
         except OSError as exc:
             raise BackendError(
-                "Could not start Codex CLI", diagnostics={**diagnostics, "category": "startup"}
+                "Could not start Codex CLI",
+                diagnostics={
+                    **diagnostics,
+                    "category": (
+                        "executable_unavailable"
+                        if isinstance(exc, FileNotFoundError)
+                        else "startup"
+                    ),
+                },
+                process_started=False,
             ) from exc
         diagnostics["stage"] = "process_started"
         previous_sigterm = None
@@ -381,10 +392,12 @@ def review(
 ) -> ReviewResponse:
     """Run an independent restricted CLI review; the caller validates its schema."""
     if not math.isfinite(timeout) or timeout <= 0:
-        raise BackendError("Review timeout must be positive and finite")
+        raise BackendError("Review timeout must be positive and finite", process_started=False)
     encoded = prompt.encode("utf-8")
     if not encoded or len(encoded) > MAX_PROMPT_BYTES:
-        raise BackendError("Review prompt is empty or exceeds its size limit")
+        raise BackendError(
+            "Review prompt is empty or exceeds its size limit", process_started=False
+        )
     executable = shutil.which("codex")
     if not executable:
         raise BackendError(
@@ -394,11 +407,12 @@ def review(
                 "stage": "starting",
                 "timeout_seconds": timeout,
             },
+            process_started=False,
         )
     try:
         schema = schema_path.resolve(strict=True)
     except OSError as exc:
-        raise BackendError("Review schema is unavailable") from exc
+        raise BackendError("Review schema is unavailable", process_started=False) from exc
     with tempfile.TemporaryDirectory(prefix="codex-ysk-") as temporary:
         workspace = Path(temporary)
         output = workspace / "review.json"

@@ -17,6 +17,7 @@ _MAX_LINE_BYTES = 1_048_576
 _TRUNCATED = "\n[... content truncated ...]\n"
 _OMITTED = "[... earlier conversation omitted ...]"
 _INCOMPLETE = "[Incomplete final transcript record omitted]"
+_FINAL_ASSISTANT = "assistant final"
 _ROLLOUT_TYPES = {
     "session_meta",
     "response_item",
@@ -145,17 +146,17 @@ def _recent_excerpt(
     max_chars: int,
 ) -> str:
     """Reserve recent requests and final replies, then fill with latest activity."""
-    per_user = max_chars // (3 * max(1, len(users)))
-    selected = {index: _clip_block(block, per_user) for index, block in users}
-    recent_indexes = {index for index, _ in recent}
-    missing_finals = [(index, block) for index, block in finals if index not in recent_indexes]
-    if max_chars >= 1000:
-        per_final = max_chars // (12 * max(1, len(missing_finals)))
-        selected.update(
-            (index, _clip_block(block, per_final))
-            for index, block in missing_finals
-            if index not in selected
-        )
+
+    def reserve(budget: int) -> dict[int, str]:
+        per_user = budget // (3 * max(1, len(users)))
+        selected = {index: _clip_block(block, per_user) for index, block in users}
+        if max_chars >= 1000:
+            per_final = budget // (4 * max(1, len(finals)))
+            selected.update((index, _clip_block(block, per_final)) for index, block in finals)
+        return selected
+
+    reserved_budget = max_chars
+    selected = reserve(reserved_budget)
 
     def render() -> str:
         parts = []
@@ -167,12 +168,17 @@ def _recent_excerpt(
             previous = index
         return "\n\n".join(parts)
 
-    # Gap markers also compete for room. Drop older final replies before user
-    # requests so recent results retain at least half the budget.
-    final_indexes = {index for index, _ in missing_finals}
-    while selected and len(render()) > max_chars // 2:
-        removable = sorted(final_indexes & selected.keys())
-        del selected[removable[0] if removable else min(selected)]
+    if max_chars < 1000:
+        # At tiny limits, framing and gap markers alone can crowd out the latest
+        # work. Keep fewer complete requests rather than fragments of all three.
+        while selected and len(render()) > max_chars // 2:
+            del selected[min(selected)]
+    else:
+        # Reclip protected messages together when gap markers consume their reserve.
+        # A final reply must stay protected even when it is still in the recent deque.
+        while selected and len(render()) > max_chars * 3 // 4:
+            reserved_budget = max(1, reserved_budget - 2 * (len(render()) - max_chars * 3 // 4))
+            selected = reserve(reserved_budget)
     indexes = sorted(selected)
     used = len(render())
 
@@ -181,6 +187,10 @@ def _recent_excerpt(
 
     for index, block in reversed(recent):
         if index in selected:
+            available = max_chars - used + len(selected[index])
+            replacement = _clip_block(block, available)
+            used += len(replacement) - len(selected[index])
+            selected[index] = replacement
             continue
         position = bisect_left(indexes, index)
         before = indexes[position - 1] if position else 0
@@ -282,7 +292,12 @@ def _visible_item(payload: dict) -> tuple[str, bool] | None:
         if "content" not in payload:
             raise TranscriptError("Transcript message is missing its content field")
         text = _text_content(payload["content"])
-        return (frame(role, text), role == "user") if text else None
+        label = role
+        if role == "assistant" and (
+            payload.get("phase") == "final_answer" or payload.get("channel") == "final"
+        ):
+            label = _FINAL_ASSISTANT
+        return (frame(label, text), role == "user") if text else None
     if kind in {"function_call", "custom_tool_call"}:
         field = "arguments" if kind == "function_call" else "input"
         name = payload.get("name")
@@ -395,13 +410,16 @@ def _read(
                     final = (
                         payload.get("type") == "message"
                         and payload.get("role") == "assistant"
-                        and payload.get("phase") == "final_answer"
+                        and (
+                            payload.get("phase") == "final_answer"
+                            or payload.get("channel") == "final"
+                        )
                     )
                 sequence += 1
                 if user:
                     users.append((sequence, _clip_block(block, max_chars // 3)))
                 if final:
-                    finals.append((sequence, _clip_block(block, max_chars // 12)))
+                    finals.append((sequence, _clip_block(block, max_chars // 4)))
                 block = _clip_block(block, max_chars - 2)
                 recent.append((sequence, block))
                 total += len(block) + 2

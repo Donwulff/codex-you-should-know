@@ -55,7 +55,7 @@ def eligible(session: Session, config: Config, event: str, now: float, force: bo
         and now - session.last_transcript_failure < config.min_interval_seconds
     ):
         return False
-    if session.attempts and now - session.last_attempt < config.min_interval_seconds:
+    if session.last_attempt and now - session.last_attempt < config.min_interval_seconds:
         return False
     return session.events - session.checked_events >= config.every_n_tools
 
@@ -74,6 +74,7 @@ def check(
     session = state.observe(session_id, event == "PostToolUse")
     usage: dict[str, int] = {}
     model_called = False
+    attempt_id: int | None = None
     phase = "review"
     diagnostics: dict[str, Any] = {}
     transcript_available: bool | None = None
@@ -275,7 +276,7 @@ def check(
                 deferred = backoff(None)
                 if deferred:
                     return deferred
-                state.begin(session_id, time.time())
+                attempt_id = state.begin(session_id, time.time())
                 model_called = True
                 response = backend.review(
                     prompt,
@@ -357,7 +358,7 @@ def check(
             deferred = backoff(candidate)
             if deferred:
                 return deferred
-            state.begin(session_id, time.time())
+            attempt_id = state.begin(session_id, time.time())
             model_called = True
             confirming = True
             response = backend.review(
@@ -402,10 +403,19 @@ def check(
             detail = str(error)[:500]
             transient = False
             if isinstance(error, backend.BackendError):
+                if not error.process_started and attempt_id is not None:
+                    state.cancel_attempt(session_id, attempt_id)
+                    model_called = False
                 backend_diagnostics = getattr(error, "diagnostics", {})
                 diagnostics["backend"] = backend_diagnostics
                 category = backend_diagnostics.get("category")
-                transient = category in {"rate_limit", "timeout", "connection"}
+                transient = category in {
+                    "rate_limit",
+                    "timeout",
+                    "connection",
+                    "executable_unavailable",
+                    "startup",
+                }
                 if category == "rate_limit":
                     state.defer_reviewer(
                         selected_model,

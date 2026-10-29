@@ -210,6 +210,74 @@ def test_confirmation_preparation_validates_only_shown_original_and_subsequent_t
     ) == (True, "Unresolved")
 
 
+@pytest.mark.parametrize("confirmation", [False, True])
+def test_requests_and_final_disclosures_survive_both_clipping_stages(tmp_path, confirmation):
+    requests = ["Current exporter investigation", "Keep existing formats", "Continue checking"]
+    disclosures = [
+        "ALREADY DISCLOSED: timestamps use the wrong timezone.",
+        "Storage cost disclosed.",
+    ]
+    payloads = [
+        {"type": "message", "role": "user", "content": f"Obsolete request {i}"} for i in range(3)
+    ]
+    for request in requests:
+        payloads.append({"type": "message", "role": "user", "content": request})
+    for disclosure in disclosures:
+        payloads.append(
+            {"type": "message", "role": "assistant", "phase": "final_answer", "content": disclosure}
+        )
+    payloads.extend(
+        {"type": "function_call_output", "call_id": str(i), "output": "漢" * 10000}
+        for i in range(30)
+    )
+    path = tmp_path / "synthetic-rollout.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps({"type": "response_item", "payload": payload}, ensure_ascii=False) + "\n"
+            for payload in payloads
+        )
+    )
+    text, _ = read_snapshot(path, 200000)
+    assert len(text) <= 200000
+    assert len(text.encode()) > assessment.MAX_PROMPT_BYTES
+    assert all(disclosure in text for disclosure in disclosures)
+    if confirmation:
+        _, text = assessment.prepare_prompt(text, [])
+        candidate = assessment.Finding("topic", "summary", "explanation", ["漢"])
+        subsequent = frame("tool result: id=next", "MORE" * 60000 + "\nSubsequent result")
+        prompt, shown = assessment.prepare_confirmation_prompt(candidate, text, subsequent)
+        assert "Subsequent result" in shown
+    else:
+        prompt, shown = assessment.prepare_prompt(text, [])
+    assert len(prompt.encode()) <= assessment.MAX_PROMPT_BYTES
+    assert "Obsolete request" not in shown
+    assert all(shown.count(request) == 1 for request in requests)
+    assert all(shown.count(disclosure) == 1 for disclosure in disclosures)
+    assert len([label for label, _ in source_blocks(shown) if label == "user"]) == 3
+
+
+def test_final_reply_remains_eligible_assistant_claim_evidence(tmp_path):
+    claim = "The exporter retains timezone conversion."
+    observed = "Timezone conversion was removed."
+    path = tmp_path / "synthetic-rollout.jsonl"
+    payloads = [
+        {"type": "message", "role": "assistant", "phase": "final_answer", "content": claim},
+        {"type": "function_call_output", "call_id": "result", "output": observed},
+    ]
+    path.write_text(
+        "".join(json.dumps({"type": "response_item", "payload": item}) + "\n" for item in payloads)
+    )
+    transcript, _ = read_snapshot(path)
+    _, shown = assessment.prepare_prompt(transcript, [])
+    response = finding_response([claim, observed])
+    response["finding"]["assistant_claim"] = True
+    finding = assessment.parse_finding(response, shown)
+    assert finding is not None and finding.evidence == [claim, observed]
+    with pytest.raises(assessment.AssessmentError, match="quote the assistant too"):
+        response["finding"]["evidence"] = [observed]
+        assessment.parse_finding(response, shown)
+
+
 def test_rejected_evidence_diagnostics_show_escaped_quote_and_nearest_difference():
     transcript = frame("tool result: id=1", "alpha\nbeta")
     response = finding_response(["alpha\nbeto"])

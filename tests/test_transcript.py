@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from you_should_know.transcript import (
+    _FINAL_ASSISTANT,
     TranscriptError,
     frame,
     last_assistant_message,
@@ -207,7 +208,7 @@ def test_preserves_prior_final_disclosure_after_long_followup(tmp_path: Path) ->
     assert "I already disclosed the DST parsing defect." in text
     assert "Why did changing the timezone setting have no effect?" in text
     assert "The timezone setting needs a web server restart." in text
-    assert [label for label, _ in blocks].count("assistant") == 2
+    assert [label for label, _ in blocks].count(_FINAL_ASSISTANT) == 2
     assert text.index("DST parsing defect") < text.index("changing the timezone")
 
 
@@ -526,3 +527,73 @@ def test_latest_assistant_reader_captures_parse_diagnostics(tmp_path: Path) -> N
     assert caught.value.diagnostics["path"] == str(path)
     assert caught.value.diagnostics["line_number"] == 3
     assert caught.value.diagnostics["line_prefix"] == repr(b"\x00\n")
+
+
+@pytest.mark.parametrize("budget", [1000, 60000, 200000])
+def test_resumed_session_keeps_latest_requests_after_tool_heavy_work(tmp_path, budget):
+    requests = ["Current request: review the exporter", "Keep the existing format", "Continue"]
+    path = rollout(
+        tmp_path,
+        *(message("user", f"Obsolete request {i}") for i in range(3)),
+        *(message("user", request) for request in requests),
+        *(
+            {"type": "function_call_output", "call_id": str(i), "output": "work " * 1000}
+            for i in range(60)
+        ),
+        message("assistant", "Current exporter review complete"),
+    )
+    text, offset = read_snapshot(path, budget)
+    assert len(text) <= budget
+    assert "Obsolete request" not in text
+    assert all(text.count(request) == 1 for request in requests)
+    assert [text.index(request) for request in requests] == sorted(
+        text.index(request) for request in requests
+    )
+    assert "Current exporter review complete" in text
+    assert offset == path.stat().st_size
+
+
+@pytest.mark.parametrize("phase_field", [{"phase": "final_answer"}, {"channel": "final"}])
+def test_disclosure_in_recent_activity_survives_user_reservation(tmp_path, phase_field):
+    disclosure = "ALREADY DISCLOSED: timestamps use the wrong timezone."
+    latest = "Latest result: configuration reviewed."
+    path = rollout(
+        tmp_path,
+        message("user", "CURRENT REQUEST: " + "u" * 500),
+        {"type": "function_call_output", "call_id": "old", "output": "old" * 200},
+        {**message("assistant", disclosure), **phase_field},
+        {"type": "function_call_output", "call_id": "new", "output": "x" * 600},
+        {**message("assistant", latest), **phase_field},
+    )
+    text = read_transcript(path, 1000)
+    assert len(text) <= 1000
+    assert "CURRENT REQUEST" in text
+    assert disclosure in text and latest in text
+    assert text.index(disclosure) < text.index(latest)
+    assert text.count(disclosure) == 1
+
+
+def test_disclosures_outside_recent_activity_survive_tool_heavy_followup(tmp_path):
+    disclosures = [
+        "Disclosed limitation: no timezone conversion.",
+        "Disclosed cost: extra storage.",
+    ]
+    path = rollout(
+        tmp_path,
+        message("user", "Investigate the exporter"),
+        *(
+            {**message("assistant", disclosure), "phase": "final_answer"}
+            for disclosure in disclosures
+        ),
+        message("user", "Continue checking configuration"),
+        *(
+            {"type": "function_call_output", "call_id": str(i), "output": "work " * 1000}
+            for i in range(60)
+        ),
+        message("assistant", "The check is still running"),
+    )
+    text = read_transcript(path, 2000)
+    assert len(text) <= 2000
+    assert all(text.count(disclosure) == 1 for disclosure in disclosures)
+    assert text.index(disclosures[0]) < text.index(disclosures[1]) < text.index("Continue checking")
+    assert "The check is still running" in text

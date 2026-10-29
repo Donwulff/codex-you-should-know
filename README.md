@@ -118,7 +118,9 @@ Start a new session after updating. Review and trust any new or modified definit
 
 Continue working in Codex. After six completed tools, the plugin can start a background review. With no pending candidate, a review looks for one new concern. A concern first becomes a pending candidate. At the next eligible check or at turn end, a separate confirmation review checks that candidate against the conversation added since the first review. While a candidate is pending, eligible checks confirm it rather than search for another concern. A successful finding normally uses two model calls: the initial review and one confirmation. Both reviews use the supplied conversation log; they do not independently inspect your system.
 
-Initial findings about work still in progress are recorded as suppressed. If confirmation finds the concern fixed, disclosed, still being worked on, or unsupported, the candidate is recorded as withdrawn, with a reason. A confirmation that fails because of a rate limit, timeout, or recognized connection error keeps the candidate pending; other confirmation failures withdraw it. Neither path shows an unconfirmed finding. If the call budget or check time limit prevents confirmation from starting, the candidate stays pending for the next eligible check. At turn end, the plugin reports that pending state instead of silently losing the candidate.
+When the conversation exceeds the input limits, the plugin prioritizes the latest three user messages and two final assistant replies, then fills remaining space with recent activity in its original order. This keeps current requests and recent disclosures visible during long tool sequences and resumed conversations. Both transcript clipping and the final prompt byte limit preserve these priorities. Long messages can still be shortened, and older requirements can fall outside the excerpt; the reviewer must not infer a problem from omitted context alone.
+
+Initial findings about work still in progress are recorded as suppressed. If confirmation finds the concern fixed, disclosed, still being worked on, or unsupported, the candidate is recorded as withdrawn, with a reason. Confirmation failures caused by a reviewer rate limit, timeout, recognized connection error, or a Codex executable that cannot start retain the candidate for a later confirmation. Other confirmation failures withdraw it. Neither path shows an unconfirmed finding. If the call budget, rate-limit pause, or check time limit prevents confirmation from starting, the candidate stays pending for the next eligible check. At turn end, the plugin reports that pending state instead of silently losing the candidate.
 
 Confirmation reads the latest available conversation before its model call. If that conversation shows that the concern was fixed, disclosed, accepted, still being worked on, or unsupported, the reviewer can withdraw it. New messages or tool activity arriving during the call do not cancel an approved result or trigger another confirmation. For example, unrelated tests finishing during confirmation do not postpone a note about lost settings. The assistant might also restore those settings while confirmation is running, so a note can occasionally arrive after its cause has been resolved. The note reflects the conversation supplied to the reviewer.
 
@@ -142,7 +144,7 @@ Automatic hooks skip local `codex exec` (including `codex e` and `codex exec res
 
 Detection uses the current Codex process on Linux, WSL, and macOS. A thread created by `exec` can receive automatic checks when resumed interactively. Unrecognized clients, shared app servers, unreadable process information, and unfamiliar command-line options retain automatic checks. Put image arguments after the subcommand, as in `codex exec --image picture.png`, for reliable detection.
 
-Background checks are at least 120 seconds apart. By default, each session has a rolling budget of 30 model calls per hour, including confirmation calls and failed requests. Unchanged excerpts and other checks that make no model request do not spend that budget. When the budget is exhausted, the plugin shows one notice and retains pending candidates. Calls become available again as earlier calls leave the rolling hour. An explicitly configured `max_checks_per_session` still applies as an additional lifetime limit, including resumed sessions.
+Background checks are at least 120 seconds apart. By default, each session has a rolling budget of 30 model calls per hour, including confirmation calls and failed requests. Unchanged excerpts, failed process launches, and other checks that make no model request do not spend that budget. Failed launches retain the normal background retry interval. When the budget is exhausted, the plugin shows one notice and retains pending candidates. Calls become available again as earlier calls leave the rolling hour. An explicitly configured `max_checks_per_session` still applies as an additional lifetime limit, including resumed sessions.
 
 The reviewer looks for useful, concrete mistakes, overlooked constraints, and
 tradeoffs demonstrated by tool results. Modest costs, wasted effort, unavailable
@@ -403,14 +405,16 @@ After validation, it replaces the existing `you-should-know@you-should-know`
 installation and marketplace registration with the local bundle. This handles
 switching from the GitHub installation as well as subsequent development updates,
 without leaving two copies enabled. Other marketplaces are untouched. Your notes
-and YSK `config.toml` remain in their existing data directory. Before replacement,
-the updater saves the installed plugin cache under
+and YSK `config.toml` remain in their existing data directory. The updater stops
+before removal if the installed plugin's enabled state is unavailable or invalid.
+Before replacement, the updater saves the installed plugin cache under
 `${CODEX_HOME:-~/.codex}/plugin-update-backups`, separately from the marketplace
 source. This also supports a local marketplace pointing at the checkout itself.
 A failed installation attempts to restore those saved files and the previous
 enabled or disabled setting, even if the marketplace has since advanced. Recovery
-checks the restored files, version, and enablement before reporting success and
-does not require a GitHub download. It prints the backup location and retains it
+checks the restored files, plugin identity, marketplace path, version, and
+enablement before reporting success and does not require a GitHub download.
+It prints the backup location and retains it
 as the recovery marketplace; keep that directory until a later successful update.
 
 Reopen the Codex client afterward and open `/hooks` to review and trust the four hooks. A local

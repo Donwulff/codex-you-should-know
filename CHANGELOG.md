@@ -5,18 +5,8 @@
 ### Fixed
 
 - Include the note summary in every turn-end menu, including notes already sent during tool activity, so reply choices never appear without their note. Repeated hooks in the same turn still show the menu only once.
-- Give end-of-turn reviews the full remaining check deadline instead of halving it. Defer confirmation when too little time remains, and retain candidates after reviewer timeouts, rate limits, or recognized connection failures.
-- Detect reviewer rate limits in JSON events and recognized stderr errors, stop the affected request, and persist a bounded retry delay shared by automatic checks using the same model. Explicit manual checks can still probe recovery.
-
-### Added
-
-- Added `scripts/dev_update.py` to merge upstream changes, preserve local edits, validate the checkout, and install a versioned development bundle. Failed installations restore a snapshot of the previously installed package and its enabled state; `--prepare-only` validates and builds without changing the installed plugin.
-- Include sanitized reviewer failure categories, subprocess stages, timeout budgets, and recognized retry delays in check diagnostics. Show active model pauses in `status` under `reviewer_backoff`.
-- Retain parsed review and confirmation responses that fail validation in `diagnostics.rejected_response`, capped at 16,384 serialized characters with explicit length and truncation metadata. This preserves rejected summaries and explanations for inspection without creating candidates or notes, weakening evidence checks, or making extra model calls.
-- Record a bounded category and explanation when an initial review returns no finding. `status` exposes per-check `diagnostics.no_finding` and scoped `no_finding_reasons` totals; older clear reviews retain an unknown category. These diagnostics do not create notes or additional reviewer calls.
-- Add `notes --cwd` and `status --cwd` to inspect one session working directory, including scoped check history, totals, model usage, transcript diagnostics, hook sightings, warnings, and mutes.
-- Show compact pending candidates alongside published notes. `notes --all` includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit stored transcripts and evidence and do not trigger reviewer calls.
-- Add `status --limit` and `status --skipped`. Recent check history hides skipped checks by default while totals retain them. New check records link to compact candidate and note summaries; legacy associations remain unknown.
+- Prevent recursive development-update backups when the checkout itself is the local marketplace. Rollback now restores and verifies the installed cache's files and version, preserves disabled plugins, and keeps recovery files under `CODEX_HOME/plugin-update-backups`.
+- Accept a valid confirmation against the conversation supplied to the reviewer. New messages or tool activity during the model call no longer withdraw an approved candidate or trigger extra confirmations. A failed transcript read after confirmation starts still prevents publication. A note can occasionally arrive after its cause has been resolved; published notes are not automatically reassessed by later reviews.
 
 ### Changed
 
@@ -25,11 +15,29 @@
 - Added concise reminders after review and confirmation context, and clarified the observer's focus on practical consequences and explanations in plain language. Prompt changes have not been evaluated for model quality.
 - Explained model selection in terms of the active chat, the plugin's own model override, and the separate reviewer CLI's fallback with user configuration ignored.
 
+## [0.3.4] - 2026-10-29
+
 ### Fixed
 
-- Preserve the latest three user messages when shortening long transcripts, instead of pinning the first three indefinitely. Keep requests and corrections in their original order alongside recent work, and preserve them through further model-input shortening and confirmation. Mark omitted regions and keep repeated clipping from turning truncation-marker fragments into evidence.
-- Prevent recursive development-update backups when the checkout itself is the local marketplace. Rollback now restores and verifies the installed cache's files and version, preserves disabled plugins, and keeps recovery files under `CODEX_HOME/plugin-update-backups`.
-- Accept a valid confirmation against the conversation supplied to the reviewer. New messages or tool activity during the model call no longer withdraw an approved candidate or trigger extra confirmations. A failed transcript read after confirmation starts still prevents publication. A note can occasionally arrive after its cause has been resolved; published notes are not automatically reassessed by later reviews.
+- Preserved the latest three user requests and two final assistant replies through transcript and prompt clipping. Recent disclosures remain protected when reserved user text reduces the activity window and when Unicode input triggers the final byte limit.
+- Rejected missing or invalid installed enablement metadata before development updates remove anything. Rollback now verifies the restored marketplace path and plugin identity alongside existing package, version, and enabled-state checks.
+- Retain pending candidates when the Codex executable disappears or cannot start, including during CLI updates. Failed launches no longer consume the hourly or session model-call budget; the normal background cooldown still applies before retrying.
+- Give end-of-turn reviews the full remaining check deadline instead of halving it. Defer confirmation when too little time remains, and retain candidates after reviewer timeouts, rate limits, or recognized connection failures.
+- Detect reviewer rate limits in JSON events and recognized stderr errors, stop the affected request, and persist a bounded retry delay shared by automatic checks using the same model. Explicit manual checks can still probe recovery.
+
+### Added
+
+- Added categorized explanations for clear initial reviews and `no_finding_reasons` totals in `status`, including directory-scoped totals and unknown classifications for older records.
+- Retained bounded rejected reviewer responses in local check diagnostics so validation failures can be inspected without publishing unconfirmed notes. Existing retention limits apply.
+- Added `scripts/dev_update.py` to merge upstream changes, preserve local edits, validate the checkout, and install a versioned development bundle. Failed installations restore a snapshot of the previously installed package and its enabled state; `--prepare-only` validates and builds without changing the installed plugin.
+- Include sanitized reviewer failure categories, subprocess stages, timeout budgets, and recognized retry delays in check diagnostics. Show active model pauses in `status` under `reviewer_backoff`.
+- Add `notes --cwd` and `status --cwd` to inspect one session working directory, including scoped check history, totals, model usage, transcript diagnostics, hook sightings, warnings, and mutes.
+- Show compact pending candidates alongside published notes. `notes --all` includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit stored transcripts and evidence and do not trigger reviewer calls.
+- Add `status --limit` and `status --skipped`. Recent check history hides skipped checks by default while totals retain them. New check records link to compact candidate and note summaries; legacy associations remain unknown.
+
+Context preservation, decision diagnostics, and selected updater checks were adapted from [Donwulff's fork](https://github.com/Donwulff/codex-you-should-know/tree/ad409d14d3dc06bc54e4ffd554eb793b7c021ab7). That upstream release retains exact evidence validation, its existing alert threshold, and withdrawal of confirmations after newer activity. This fork uses the review and confirmation policies described in the unreleased changes above.
+
+Start a new Codex session after updating. Existing notes and configuration are preserved; review any hooks marked modified in `/hooks`.
 
 ## [0.3.3] - 2026-10-26
 

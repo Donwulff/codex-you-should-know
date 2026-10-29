@@ -291,19 +291,33 @@ class State:
                     "DELETE FROM transcript_retries WHERE session_id = ?", (session_id,)
                 )
 
-    def begin(self, session_id: str, now: float) -> None:
+    def begin(self, session_id: str, now: float) -> int:
         with self.connection:
             self.connection.execute(
                 "UPDATE sessions SET checked_events = events, attempts = attempts + 1, "
                 "last_attempt = ?, touched_at = ? WHERE session_id = ?",
                 (now, now, session_id),
             )
-            self.connection.execute(
+            cursor = self.connection.execute(
                 "INSERT INTO attempts(session_id, created_at) VALUES (?, ?)", (session_id, now)
             )
             self.connection.execute(
                 "DELETE FROM notices WHERE session_id = ? AND key = 'budget'", (session_id,)
             )
+            assert cursor.lastrowid is not None
+            return cursor.lastrowid
+
+    def cancel_attempt(self, session_id: str, attempt_id: int) -> None:
+        with self.connection:
+            removed = self.connection.execute(
+                "DELETE FROM attempts WHERE session_id = ? AND rowid = ?",
+                (session_id, attempt_id),
+            ).rowcount
+            if removed:
+                self.connection.execute(
+                    "UPDATE sessions SET attempts = attempts - 1 WHERE session_id = ?",
+                    (session_id,),
+                )
 
     def finish(self, session_id: str, now: float, digest: str, error: str = "") -> None:
         with self.connection:

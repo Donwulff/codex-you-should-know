@@ -265,7 +265,7 @@ def test_published_install_switches_to_local_and_repeated_install_is_unchanged(i
     assert not list((updater.codex_home() / "plugin-update-backups").iterdir())
 
 
-def test_failed_install_restores_previous_files_without_network(installation):
+def test_failed_install_restores_previous_files_without_network(installation, capsys):
     root, fake = installation
     bundle = updater.build(root)
     fake.fail_next_add = True
@@ -279,6 +279,40 @@ def test_failed_install_restores_previous_files_without_network(installation):
     assert backup.is_dir()
     assert (backup.parent / "previous.json").exists()
     assert backup != bundle
+    assert fake.plugins[0]["pluginId"] == updater.PLUGIN
+    output = capsys.readouterr().err
+    assert "Restored the previous files from a local backup" in output
+    assert "Automatic restoration failed" not in output
+
+
+@pytest.mark.parametrize("mismatch", ["marketplace", "plugin_id"])
+def test_failed_install_does_not_claim_restoration_with_wrong_registration(
+    installation, monkeypatch, capsys, mismatch
+):
+    root, fake = installation
+    bundle = updater.build(root)
+    fake.fail_next_add = True
+
+    def codex(root, *args):
+        result = fake(root, *args)
+        if args == ("add", updater.PLUGIN):
+            if mismatch == "marketplace":
+                fake.marketplace["root"] = str(root / "wrong marketplace")
+            else:
+                fake.plugins[0]["pluginId"] = "wrong-plugin@you-should-know"
+        return result
+
+    monkeypatch.setattr(updater, "codex", codex)
+    with pytest.raises(updater.UpdateError, match="restoration details"):
+        updater.install(root, bundle)
+
+    output = capsys.readouterr().err
+    assert "Automatic restoration failed" in output
+    assert "Restored the previous files from a local backup" not in output
+    backups = list((updater.codex_home() / "plugin-update-backups").glob("ysk-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "previous.json").is_file()
+    assert (backups[0] / "marketplace/plugin/.codex-plugin/plugin.json").is_file()
 
 
 @pytest.mark.parametrize("installed", [False, True])
@@ -375,6 +409,28 @@ def test_failed_backup_is_cleaned_up_without_changing_installation(installation,
     assert fake.plugins == [original]
     assert not list((updater.codex_home() / "plugin-update-backups").iterdir())
     assert not [c for c in fake.calls if "add" in c or "remove" in c]
+
+
+@pytest.mark.parametrize("enabled", [None, 0, 1, "false", "true", [], {}])
+def test_invalid_installed_enablement_stops_before_removal(installation, enabled):
+    root, fake = installation
+    fake.plugins[0]["enabled"] = enabled
+    original = updater.file_hashes(updater.installed_files(fake.plugins[0]))
+    with pytest.raises(updater.UpdateError, match="enablement"):
+        updater.install(root, updater.build(root))
+    assert not [c for c in fake.calls if "add" in c or "remove" in c]
+    assert updater.file_hashes(updater.installed_files(fake.plugins[0])) == original
+    assert not list((updater.codex_home() / "plugin-update-backups").glob("ysk-*"))
+
+
+def test_missing_installed_enablement_stops_before_removal(installation):
+    root, fake = installation
+    del fake.plugins[0]["enabled"]
+    with pytest.raises(updater.UpdateError, match="enablement"):
+        updater.install(root, updater.build(root))
+    assert not [c for c in fake.calls if "add" in c or "remove" in c]
+    assert updater.installed_files(fake.plugins[0]).is_dir()
+    assert not list((updater.codex_home() / "plugin-update-backups").glob("ysk-*"))
 
 
 @pytest.mark.parametrize("other_marketplace", [False, True])
