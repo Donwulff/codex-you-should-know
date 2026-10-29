@@ -610,7 +610,6 @@ class State:
     ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         notifications = []
         armed_note = None
-        newly_delivered = set()
         now = time.time()
         with self._transaction():
             rows = self.connection.execute(
@@ -626,7 +625,6 @@ class State:
                 if note is None:
                     continue
                 notifications.append({"note": self._decode(note)})
-                newly_delivered.add(note["id"])
                 self.connection.execute(
                     "UPDATE notes SET touched_at = ? WHERE id = ?", (now, note["id"])
                 )
@@ -666,8 +664,6 @@ class State:
                         last_turn_id = armed_note.pop("last_turn_id")
                         if last_turn_id:
                             notifications.append({"note": armed_note, "reminder": True})
-                        elif note["id"] not in newly_delivered:
-                            armed_note["already_shown"] = True
                         self.connection.execute(
                             "UPDATE reminders SET last_turn_id = ? WHERE note_id = ?",
                             (turn_id, note["id"]),

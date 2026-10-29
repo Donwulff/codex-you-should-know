@@ -190,7 +190,7 @@ To include feedback, reply "4 your message".
 
 The numbers keep the same meaning between menus. Chat becomes available only after you read the details. You can use `dismiss` or `chat in main session` instead of a number.
 
-These replies act on the most recent displayed note in the current session. If a note already appeared during the turn, turn end shows only its menu. If you continue ordinary work, the note returns at the next turn end with compact choices. Before you read the details, the reminder looks like this:
+These replies act on the most recent displayed note in the current session. Every turn-end menu includes the note's summary, even if a notification was already sent during tool activity. If you continue ordinary work, the note returns at the next turn end with compact choices. Before you read the details, the reminder looks like this:
 
 ```text
 You Should Know [8f31a7c62b40] · Your previous settings were deleted.

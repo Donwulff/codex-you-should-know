@@ -42,16 +42,17 @@ def test_reply_target_expires_after_ten_minutes(tmp_path, monkeypatch):
     state.close()
 
 
-def test_stop_distinguishes_note_already_shown_midturn(tmp_path):
+def test_stop_retains_midturn_note_summary_after_restart(tmp_path):
     state = State(tmp_path)
-    state.save("session", finding(), 100, notify=True)
+    identifier = state.save("session", finding(), 100, notify=True)
     notifications, active = state.deliver("session")
     assert len(notifications) == 1
     assert active is None
+    state.close()
+    state = State(tmp_path)
     notifications, active = state.deliver("session", ready=True, turn_id="finished")
     assert notifications == []
-    assert active is not None
-    assert active["already_shown"] is True
+    assert active == {**state.note(identifier), "expanded": False}
     state.close()
 
 

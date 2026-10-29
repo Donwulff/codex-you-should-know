@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Include the note summary in every turn-end menu, including notes already sent during tool activity, so reply choices never appear without their note. Repeated hooks in the same turn still show the menu only once.
 - Give end-of-turn reviews the full remaining check deadline instead of halving it. Defer confirmation when too little time remains, and retain candidates after reviewer timeouts, rate limits, or recognized connection failures.
 - Detect reviewer rate limits in JSON events and recognized stderr errors, stop the affected request, and persist a bounded retry delay shared by automatic checks using the same model. Explicit manual checks can still probe recovery.
 
