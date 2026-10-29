@@ -45,6 +45,7 @@ def test_reply_target_expires_after_ten_minutes(tmp_path, monkeypatch):
 def test_stop_retains_midturn_note_summary_after_restart(tmp_path):
     state = State(tmp_path)
     identifier = state.save("session", finding(), 100, notify=True)
+    assert identifier is not None
     notifications, active = state.deliver("session")
     assert len(notifications) == 1
     assert active is None
