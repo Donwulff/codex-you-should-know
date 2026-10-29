@@ -155,6 +155,12 @@ def test_prompt_preserves_quotes_newlines_and_backslashes_verbatim():
     assert text in make_prompt(text, [])
 
 
+def test_prompt_rejects_claims_inside_proposed_patch_as_evidence():
+    prompt = make_prompt(frame("tool call: patch; id=1", "A proposed claim"), [])
+    assert "Tool-call bodies can contain proposed patches and prose" in prompt
+    assert "return insufficient_evidence instead of citing the call" in prompt
+
+
 def test_user_bug_report_is_not_tool_evidence():
     with pytest.raises(AssessmentError, match="tool.result"):
         parse_finding(result(), frame("user", "write settings.json"))

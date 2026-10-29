@@ -139,11 +139,23 @@ def _clip_block(block: str, limit: int) -> str:
 
 
 def _recent_excerpt(
-    recent: deque[tuple[int, str]], users: deque[tuple[int, str]], max_chars: int
+    recent: deque[tuple[int, str]],
+    users: deque[tuple[int, str]],
+    finals: deque[tuple[int, str]],
+    max_chars: int,
 ) -> str:
-    """Reserve context for recent user messages, then fill with the latest activity."""
+    """Reserve recent requests and final replies, then fill with latest activity."""
     per_user = max_chars // (3 * max(1, len(users)))
     selected = {index: _clip_block(block, per_user) for index, block in users}
+    recent_indexes = {index for index, _ in recent}
+    missing_finals = [(index, block) for index, block in finals if index not in recent_indexes]
+    if max_chars >= 1000:
+        per_final = max_chars // (12 * max(1, len(missing_finals)))
+        selected.update(
+            (index, _clip_block(block, per_final))
+            for index, block in missing_finals
+            if index not in selected
+        )
 
     def render() -> str:
         parts = []
@@ -155,10 +167,12 @@ def _recent_excerpt(
             previous = index
         return "\n\n".join(parts)
 
-    # At very small budgets, gap markers also compete for room. Drop the oldest
-    # reserved message first so recent results always retain at least half.
+    # Gap markers also compete for room. Drop older final replies before user
+    # requests so recent results retain at least half the budget.
+    final_indexes = {index for index, _ in missing_finals}
     while selected and len(render()) > max_chars // 2:
-        del selected[min(selected)]
+        removable = sorted(final_indexes & selected.keys())
+        del selected[removable[0] if removable else min(selected)]
     indexes = sorted(selected)
     used = len(render())
 
@@ -309,6 +323,7 @@ def _read(
     recent: deque[tuple[int, str]] = deque()
     total = 0
     users: deque[tuple[int, str]] = deque(maxlen=3)
+    finals: deque[tuple[int, str]] = deque(maxlen=2)
     omitted = False
     recognized = offset > 0
     sequence = 0
@@ -350,6 +365,7 @@ def _read(
                 digest=digest if checkpoint is not None else None,
             ):
                 user = False
+                final = False
                 if row is None:
                     incomplete_tail = marker == _INCOMPLETE
                     block = marker or ""
@@ -376,9 +392,16 @@ def _read(
                     if visible is None:
                         continue
                     block, user = visible
+                    final = (
+                        payload.get("type") == "message"
+                        and payload.get("role") == "assistant"
+                        and payload.get("phase") == "final_answer"
+                    )
                 sequence += 1
                 if user:
                     users.append((sequence, _clip_block(block, max_chars // 3)))
+                if final:
+                    finals.append((sequence, _clip_block(block, max_chars // 12)))
                 block = _clip_block(block, max_chars - 2)
                 recent.append((sequence, block))
                 total += len(block) + 2
@@ -431,7 +454,7 @@ def _read(
         unknown_types.update(unknown)
     if not omitted:
         return "\n\n".join(block for _, block in recent), cursor
-    return _recent_excerpt(recent, users, max_chars), cursor
+    return _recent_excerpt(recent, users, finals, max_chars), cursor
 
 
 def read_transcript(path: Path, max_chars: int = 60_000) -> str:

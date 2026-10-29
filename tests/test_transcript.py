@@ -181,6 +181,48 @@ def test_resumed_session_keeps_recent_request_after_a_long_tool_heavy_turn(tmp_p
     assert read_since(path, offset) == ""
 
 
+def test_preserves_prior_final_disclosure_after_long_followup(tmp_path: Path) -> None:
+    prior = {
+        **message("assistant", "I already disclosed the DST parsing defect."),
+        "phase": "final_answer",
+    }
+    latest = {
+        **message("assistant", "The timezone setting needs a web server restart."),
+        "phase": "final_answer",
+    }
+    path = rollout(
+        tmp_path,
+        message("user", "Investigate wrong message times"),
+        prior,
+        message("user", "Why did changing the timezone setting have no effect?"),
+        *(
+            {"type": "function_call_output", "call_id": str(i), "output": "work " * 1000}
+            for i in range(60)
+        ),
+        latest,
+    )
+    text = read_transcript(path, 2_000)
+    blocks = list(source_blocks(text))
+    assert len(text) <= 2_000
+    assert "I already disclosed the DST parsing defect." in text
+    assert "Why did changing the timezone setting have no effect?" in text
+    assert "The timezone setting needs a web server restart." in text
+    assert [label for label, _ in blocks].count("assistant") == 2
+    assert text.index("DST parsing defect") < text.index("changing the timezone")
+
+
+def test_recent_final_reply_is_not_shortened_by_disclosure_reservation(tmp_path: Path) -> None:
+    latest = "Current final reply: " + "z" * 300
+    path = rollout(
+        tmp_path,
+        message("user", "Current question"),
+        {"type": "function_call_output", "call_id": "old", "output": "x" * 2_000},
+        {**message("assistant", latest), "phase": "final_answer"},
+    )
+    text = read_transcript(path, 1_000)
+    assert latest in text
+
+
 def test_reserved_user_messages_stay_in_order_with_surrounding_work(tmp_path):
     path = rollout(
         tmp_path,
