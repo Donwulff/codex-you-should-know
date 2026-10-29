@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Retain pending candidates when the Codex executable disappears or cannot start, including during CLI updates. Failed launches no longer consume the hourly or session model-call budget; the normal background cooldown still applies before retrying.
 - Give end-of-turn reviews the full remaining check deadline instead of halving it. Defer confirmation when too little time remains, and retain candidates after reviewer timeouts, rate limits, or recognized connection failures.
 - Detect reviewer rate limits in JSON events and recognized stderr errors, stop the affected request, and persist a bounded retry delay shared by automatic checks using the same model. Explicit manual checks can still probe recovery.
 
