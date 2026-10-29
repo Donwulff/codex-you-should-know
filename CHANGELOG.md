@@ -1,20 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.4] - 2026-10-29
 
 ### Fixed
 
+- Preserved the latest three user requests and two final assistant replies through transcript and prompt clipping. Recent disclosures remain protected when reserved user text reduces the activity window and when Unicode input triggers the final byte limit.
+- Rejected missing or invalid installed enablement metadata before development updates remove anything. Rollback now verifies the restored marketplace path and plugin identity alongside existing package, version, and enabled-state checks.
 - Retain pending candidates when the Codex executable disappears or cannot start, including during CLI updates. Failed launches no longer consume the hourly or session model-call budget; the normal background cooldown still applies before retrying.
 - Give end-of-turn reviews the full remaining check deadline instead of halving it. Defer confirmation when too little time remains, and retain candidates after reviewer timeouts, rate limits, or recognized connection failures.
 - Detect reviewer rate limits in JSON events and recognized stderr errors, stop the affected request, and persist a bounded retry delay shared by automatic checks using the same model. Explicit manual checks can still probe recovery.
 
 ### Added
 
+- Added categorized explanations for clear initial reviews and `no_finding_reasons` totals in `status`, including directory-scoped totals and unknown classifications for older records.
+- Retained bounded rejected reviewer responses in local check diagnostics so validation failures can be inspected without publishing unconfirmed notes. Existing retention limits apply.
 - Added `scripts/dev_update.py` to merge upstream changes, preserve local edits, validate the checkout, and install a versioned development bundle. Failed installations restore a snapshot of the previously installed package and its enabled state; `--prepare-only` validates and builds without changing the installed plugin.
 - Include sanitized reviewer failure categories, subprocess stages, timeout budgets, and recognized retry delays in check diagnostics. Show active model pauses in `status` under `reviewer_backoff`.
 - Add `notes --cwd` and `status --cwd` to inspect one session working directory, including scoped check history, totals, model usage, transcript diagnostics, hook sightings, warnings, and mutes.
 - Show compact pending candidates alongside published notes. `notes --all` includes confirmed, suppressed, and withdrawn candidate history. Candidate listings omit stored transcripts and evidence and do not trigger reviewer calls.
 - Add `status --limit` and `status --skipped`. Recent check history hides skipped checks by default while totals retain them. New check records link to compact candidate and note summaries; legacy associations remain unknown.
+
+Context preservation, decision diagnostics, and selected updater checks were adapted from [Donwulff's fork](https://github.com/Donwulff/codex-you-should-know/tree/ad409d14d3dc06bc54e4ffd554eb793b7c021ab7). Exact evidence validation, the existing alert threshold, and withdrawal of confirmations after newer activity remain in place.
+
+Start a new Codex session after updating. Existing notes and configuration are preserved; review any hooks marked modified in `/hooks`.
 
 ## [0.3.3] - 2026-10-26
 

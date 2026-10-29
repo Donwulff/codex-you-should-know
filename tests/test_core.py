@@ -5,6 +5,7 @@ import threading
 from dataclasses import replace
 
 import pytest
+from review_responses import clear_response
 
 from you_should_know import backend, host
 from you_should_know.assessment import Finding
@@ -77,7 +78,10 @@ def finding_response(finding, schema_path):
             "evidence": finding.evidence,
         }
     assert schema_path.name == "finding.schema.json"
-    return {"finding": {**finding.__dict__, "agent_still_working": False, "assistant_claim": False}}
+    return {
+        "no_finding": None,
+        "finding": {**finding.__dict__, "agent_still_working": False, "assistant_claim": False},
+    }
 
 
 def test_cadence_cooldown_stop_and_limit(state):
@@ -112,7 +116,7 @@ def test_exec_automatic_check_does_not_create_state(
 ):
     directory = tmp_path / "unused-exec-state"
     monkeypatch.setattr(host, "process_info", lambda pid: (1, "/bin/codex", ["codex", "exec"]))
-    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: clear_response())
     monkeypatch.setattr(
         "sys.stdin",
         io.StringIO(
@@ -167,7 +171,7 @@ def test_interactive_resume_reviews_despite_historical_source(
     monkeypatch.setattr(
         host, "process_info", lambda pid: (1, "/bin/codex", ["codex", "resume", "s"])
     )
-    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: clear_response())
     assert (
         run_hook(
             state,
@@ -281,7 +285,7 @@ def test_distinct_path_separators_remain_distinct_but_topic_case_deduplicates(st
 
 
 def test_other_sessions_can_review_while_one_is_busy(state, transcript, monkeypatch):
-    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: clear_response())
     with review_lock(state.directory, "first-session") as locked:
         assert locked
         result = check(state, Config(), "second-session", transcript, "Stop", force=True)
@@ -289,7 +293,7 @@ def test_other_sessions_can_review_while_one_is_busy(state, transcript, monkeypa
 
 
 def test_stop_checks_conversation_without_tool_calls(state, transcript, monkeypatch):
-    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: clear_response())
     result = check(state, Config(), "s", transcript, "Stop")
     assert result["status"] == "clear"
     assert state.session("s").events == 0
@@ -302,7 +306,7 @@ def test_stop_checks_later_assistant_message_during_background_cooldown(
 
     def reviewer(*args, **kwargs):
         calls.append(args[0])
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     config = replace(Config(), every_n_tools=1)
@@ -380,7 +384,7 @@ def test_cleared_and_unchanged_are_distinct_from_failure(state, transcript, monk
 
     def reviewer(*args, **kwargs):
         calls.append(True)
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     config = replace(Config(), min_interval_seconds=0, every_n_tools=1)

@@ -3,9 +3,10 @@ import time
 from dataclasses import replace
 
 import pytest
+from review_responses import clear_response
 
 from you_should_know import backend, cli
-from you_should_know.assessment import Finding
+from you_should_know.assessment import NO_FINDING_CATEGORIES, Finding
 from you_should_know.config import Config
 from you_should_know.state import State
 
@@ -52,13 +53,64 @@ def transcript(tmp_path):
 
 def response(finding, **flags):
     return {
+        "no_finding": None,
         "finding": {
             **finding.__dict__,
             "agent_still_working": False,
             "assistant_claim": False,
             **flags,
-        }
+        },
     }
+
+
+@pytest.mark.parametrize("category", NO_FINDING_CATEGORIES)
+def test_clear_review_diagnostics_survive_restart_and_appear_in_status(
+    state, transcript, tmp_path, monkeypatch, capsys, category
+):
+    reason = "The assistant already explained the effect of the changed setting."
+    response = clear_response(category, reason)
+    calls = []
+
+    def reviewer(*args, **kwargs):
+        calls.append(args)
+        return backend.ReviewResponse(response, {"input_tokens": 100, "output_tokens": 40})
+
+    monkeypatch.setattr(backend, "review", reviewer)
+    project = str(tmp_path / "project")
+    state.hook_seen("s", "Stop", project)
+    result = cli.check(state, Config(), "s", transcript, "Stop")
+    assert result["status"] == "clear"
+    assert result["reason"] == reason
+    assert result["no_finding"] == response["no_finding"]
+    assert len(calls) == 1
+    assert state.candidates(all_candidates=True) == []
+    assert state.notes() == []
+    assert cli.notifications(state, "s") == {}
+
+    # The CLI opens a separate connection; reading status must not call a reviewer.
+    assert cli.main(["status", "--cwd", project]) == 0
+    report = json.loads(capsys.readouterr().out)
+    check = report["recent_checks"][0]
+    assert check["diagnostics"]["no_finding"] == response["no_finding"]
+    assert check["reason"] == reason
+    assert report["no_finding_reasons"] == [{"category": category, "total": 1}]
+    assert "rejected_response" not in check["diagnostics"]
+    assert report["model_calls"] == 1 and report["output_tokens"] == 40
+    assert len(calls) == 1
+
+
+def test_invalid_classification_records_error_instead_of_silent_clear(
+    state, transcript, monkeypatch
+):
+    monkeypatch.setattr(backend, "review", lambda *args, **kwargs: clear_response("unknown"))
+    assert cli.check(state, Config(), "s", transcript, "Stop")["status"] == "error"
+    report = state.diagnostics()
+    assert report["no_finding_reasons"] == []
+    assert "no_finding" not in report["recent_checks"][0]["diagnostics"]
+    saved = report["recent_checks"][0]["diagnostics"]["rejected_response"]
+    assert not saved["truncated"]
+    assert json.loads(saved["json"]) == clear_response("unknown")
+    assert report["model_calls"] == 1
 
 
 def test_notes_lists_pending_candidates_separately_from_confirmed_notes(
@@ -235,7 +287,7 @@ def test_manual_checks_are_visible_in_the_invoking_directory(
     project = tmp_path / "manual-project"
     project.mkdir()
     monkeypatch.chdir(project)
-    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *a, **k: clear_response())
     assert cli.main(["check", "--session", "manual", "--transcript", str(transcript)]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "clear"
     assert cli.main(["status", "--cwd", "."]) == 0

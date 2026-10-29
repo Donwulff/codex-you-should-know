@@ -43,6 +43,7 @@ def append_result(path, text):
 
 def finding_response(quote):
     return {
+        "no_finding": None,
         "finding": {
             "topic": "result failure",
             "summary": "Your command failed.",
@@ -50,7 +51,7 @@ def finding_response(quote):
             "evidence": [quote],
             "agent_still_working": False,
             "assistant_claim": False,
-        }
+        },
     }
 
 
@@ -154,3 +155,16 @@ def test_check_persists_rejected_quotes_and_nearest_span(state, tmp_path, monkey
     assert quote["nearest"]["text"] == "alpha\\nbeta"
     assert quote["nearest"]["ratio"] == 0.9
     assert quote["nearest"]["differences"][0]["quote_span"] == [9, 10]
+    # Inspection survives a fresh connection without promoting rejected text to a note.
+    reopened = State(state.directory)
+    try:
+        saved = reopened.diagnostics()["recent_checks"][0]["diagnostics"]["rejected_response"]
+        assert not saved["truncated"]
+        assert json.loads(saved["json"]) == response
+        assert reopened.notes() == []
+        assert reopened.pending_candidate("s") is None
+    finally:
+        reopened.close()
+    notification = cli.hook_result(result)["systemMessage"]
+    assert "Your command failed." not in notification
+    assert "Unresolved" not in notification

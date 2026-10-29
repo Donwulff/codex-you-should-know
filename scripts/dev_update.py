@@ -254,6 +254,8 @@ def inventory(root: Path) -> tuple[list[dict], dict | None]:
         raise UpdateError("Codex reported multiple YSK installations; leaving them intact.")
     if any(p["marketplaceName"] != NAME for p in copies):
         raise UpdateError("YSK is also installed from another marketplace; remove that copy first.")
+    if any(not isinstance(p.get("enabled"), bool) for p in copies):
+        raise UpdateError("Installed YSK enablement is unavailable; leaving it intact.")
     marketplace = next((m for m in marketplaces if m["name"] == NAME), None)
     if copies and not marketplace:
         raise UpdateError(
@@ -486,11 +488,16 @@ def install(root: Path, bundle: Path) -> None:
                     codex(root, "add", plugin["pluginId"])
                     if not plugin["enabled"]:
                         set_enabled(root, plugin["pluginId"], False)
-                restored, _ = inventory(root)
-                if [(p["version"], p["enabled"]) for p in restored] != [
-                    (p["version"], p["enabled"]) for p in plugins
+                restored, registered = inventory(root)
+                if (
+                    not registered
+                    or Path(registered["root"]).resolve() != (backup / "marketplace").resolve()
+                ):
+                    raise UpdateError("Restored marketplace does not match the local backup")
+                if [(p["pluginId"], p["version"], p["enabled"]) for p in restored] != [
+                    (p["pluginId"], p["version"], p["enabled"]) for p in plugins
                 ]:
-                    raise UpdateError("Restored plugin version or enabled state does not match")
+                    raise UpdateError("Restored plugin identity, version, or enabled state differs")
                 if restored and package_contents(
                     installed_package(restored[0])
                 ) != package_contents(backup / "marketplace/plugin"):

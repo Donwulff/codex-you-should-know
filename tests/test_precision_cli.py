@@ -3,6 +3,7 @@ import json
 from dataclasses import replace
 
 import pytest
+from review_responses import clear_response
 
 from you_should_know import backend, cli
 from you_should_know.assessment import Finding
@@ -54,12 +55,13 @@ def finding():
 
 def response(finding, **flags):
     return {
+        "no_finding": None,
         "finding": {
             **finding.__dict__,
             "agent_still_working": False,
             "assistant_claim": False,
             **flags,
-        }
+        },
     }
 
 
@@ -70,7 +72,7 @@ def hook(monkeypatch, capsys, event, command="hook"):
 
 
 def test_unchanged_transcript_does_not_spend_an_attempt(state, transcript, monkeypatch):
-    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *a, **k: clear_response())
     config = replace(Config(), every_n_tools=1, min_interval_seconds=0)
     assert cli.check(state, config, "s", transcript, "PostToolUse")["status"] == "clear"
     assert cli.check(state, config, "s", transcript, "PostToolUse")["status"] == "unchanged"
@@ -85,9 +87,7 @@ def test_finished_turn_can_find_oversight_after_recent_background_review(
     final_finding = replace(finding, evidence=[*finding.evidence, claim])
     replies = iter(
         [
-            response(finding, agent_still_working=True)
-            if background_finding
-            else {"finding": None},
+            response(finding, agent_still_working=True) if background_finding else clear_response(),
             response(final_finding, assistant_claim=True),
             {
                 "confirmed": True,
@@ -117,7 +117,7 @@ def test_finished_turn_can_find_oversight_after_recent_background_review(
 def test_finished_turn_respects_call_limits_during_background_cooldown(
     state, transcript, monkeypatch, limit
 ):
-    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *a, **k: clear_response())
     monkeypatch.setattr(cli.time, "time", lambda: 1000.0)
     config = replace(Config(), every_n_tools=1, **limit)
     assert cli.check(state, config, "s", transcript, "PostToolUse")["status"] == "clear"
@@ -144,7 +144,7 @@ def test_check_records_selected_model_and_source(
 
     def reviewer(*args, **kwargs):
         called.append(kwargs["model"])
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     result = cli.check(
@@ -185,7 +185,7 @@ def test_configured_review_focus_reaches_reviewer(state, transcript, monkeypatch
     def reviewer(prompt, schema, **kwargs):
         assert focus in prompt
         assert "Every finding must be demonstrated by a tool result" in prompt
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     config = replace(Config(), review_instructions=focus)
@@ -242,7 +242,7 @@ def test_stop_does_not_repeat_midturn_body(state, transcript, finding, monkeypat
     state.save("s", finding, 100, notify=True)
     event = {"session_id": "s", "hook_event_name": "PostToolUse"}
     assert finding.summary in hook(monkeypatch, capsys, event, "notify")["systemMessage"]
-    monkeypatch.setattr(backend, "review", lambda *a, **k: {"finding": None})
+    monkeypatch.setattr(backend, "review", lambda *a, **k: clear_response())
     event.update(hook_event_name="Stop", turn_id="done", transcript_path=str(transcript))
     message = hook(monkeypatch, capsys, event)["systemMessage"]
     assert finding.summary not in message
@@ -478,7 +478,7 @@ def test_usage_status_and_debug_reach_synchronous_notification(
         backend,
         "review",
         lambda *a, **k: backend.ReviewResponse(
-            {"finding": None}, {"input_tokens": 11, "cached_input_tokens": 4, "output_tokens": 3}
+            clear_response(), {"input_tokens": 11, "cached_input_tokens": 4, "output_tokens": 3}
         ),
     )
     event = {
@@ -526,7 +526,7 @@ def test_mute_and_unmute_control_real_hook_path(
 
     def reviewer(*args, **kwargs):
         calls.append(True)
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     assert hook(monkeypatch, capsys, stop) == {}
@@ -594,7 +594,7 @@ def test_stop_review_can_complete_after_half_the_budget(state, transcript, monke
         now[0] += min(70, timeout)
         if timeout < 70:
             raise backend.BackendError("Codex review timed out")
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     result = cli.check(state, Config(), "s", transcript, "Stop")
@@ -647,7 +647,7 @@ def test_reviewer_rate_limit_pauses_same_model_across_sessions_and_recovers(
                 "timeout_seconds": 90,
             }
             raise error
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     assert cli.check(state, Config(), "one", transcript, "Stop", "limited")["status"] == "error"
@@ -717,7 +717,7 @@ def test_explicit_check_can_probe_during_model_backoff(state, transcript, monkey
 
     def reviewer(*args, model, **kwargs):
         calls.append(model)
-        return {"finding": None}
+        return clear_response()
 
     monkeypatch.setattr(backend, "review", reviewer)
     result = cli.check(state, config, "manual", transcript, "Stop", "hook-model", force=True)

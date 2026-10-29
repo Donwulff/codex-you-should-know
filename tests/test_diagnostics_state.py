@@ -19,6 +19,39 @@ def finding(topic):
     return Finding(topic, f"Summary for {topic}", "Private explanation", ["private evidence"])
 
 
+def test_no_finding_totals_scope_history_without_guessing_legacy_reasons(state, tmp_path):
+    project = str(tmp_path / "project")
+    state.observe("here", False, cwd=project)
+    state.observe("there", False, cwd=str(tmp_path / "other"))
+    for session, category in (
+        ("here", "no_concern"),
+        ("here", "no_concern"),
+        ("here", "insufficient_evidence"),
+        ("here", None),
+        ("there", "already_disclosed"),
+    ):
+        diagnostics = (
+            {"no_finding": {"category": category, "reason": "A short decision summary."}}
+            if category
+            else {}
+        )
+        state.record_check(
+            session, "Stop", "clear", 100, 1, diagnostics=diagnostics, model_called=True
+        )
+    state.record_check("here", "Stop", "skipped", 101, 0)
+    expected = [
+        {"category": "no_concern", "total": 2},
+        {"category": None, "total": 1},
+        {"category": "insufficient_evidence", "total": 1},
+    ]
+    report = state.diagnostics(cwd=project, limit=1)
+    assert report["no_finding_reasons"] == expected
+    assert len(report["recent_checks"]) == 1
+    assert state.diagnostics(cwd=project, include_skipped=True)["no_finding_reasons"] == expected
+    assert state.diagnostics(cwd=str(tmp_path / "missing"))["no_finding_reasons"] == []
+    assert sum(item["total"] for item in state.diagnostics()["no_finding_reasons"]) == 5
+
+
 def test_candidate_listing_is_compact_and_distinguishes_history(state, tmp_path):
     directory = str(tmp_path / "project")
     state.observe("s", False, cwd=directory)

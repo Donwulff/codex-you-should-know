@@ -1,8 +1,10 @@
 import json
 
 import pytest
+from review_responses import clear_response
 
 from you_should_know.assessment import (
+    NO_FINDING_CATEGORIES,
     AssessmentError,
     Finding,
     make_confirmation_prompt,
@@ -16,6 +18,7 @@ from you_should_know.transcript import frame, source_blocks
 
 def result():
     return {
+        "no_finding": None,
         "finding": {
             "topic": "settings save deletes prior preferences",
             "summary": "Saving settings removes your earlier preferences.",
@@ -23,15 +26,56 @@ def result():
             "evidence": ["write settings.json"],
             "agent_still_working": False,
             "assistant_claim": False,
-        }
+        },
     }
 
 
 def test_clear_requires_explicit_null():
-    assert parse_finding({"finding": None}, "conversation") is None
+    assert parse_finding(clear_response(), "conversation") is None
     for response in ({}, {"findings": None}, {"finding": None, "extra": True}, []):
         with pytest.raises(AssessmentError):
             parse_finding(response, "conversation")
+
+
+@pytest.mark.parametrize("category", NO_FINDING_CATEGORIES)
+def test_no_finding_requires_a_classified_short_explanation(category):
+    diagnostic = {}
+    response = clear_response(category, "The assistant has explained the feature limitation.")
+    assert parse_finding(response, "conversation", diagnostics=diagnostic) is None
+    assert diagnostic == {"no_finding": response["no_finding"]}
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        None,
+        {},
+        {"category": "no_concern"},
+        {"category": "invented", "reason": "No note."},
+        {"category": [], "reason": "No note."},
+        {"category": "no_concern", "reason": ""},
+        {"category": "no_concern", "reason": "x" * 801},
+        {"category": "no_concern", "reason": "escape \x1b[31m"},
+        {"category": "no_concern", "reason": 123},
+        {"category": "no_concern", "reason": "No note.", "extra": True},
+    ],
+)
+def test_invalid_no_finding_diagnostics_fail_without_being_recorded(decision):
+    diagnostics = {}
+    with pytest.raises(AssessmentError):
+        parse_finding(
+            {"finding": None, "no_finding": decision}, "conversation", diagnostics=diagnostics
+        )
+    assert diagnostics == {}
+
+
+def test_missing_diagnostic_field_and_contradictory_result_fail():
+    with pytest.raises(AssessmentError, match="no_finding"):
+        parse_finding({"finding": None}, "conversation")
+    response = result()
+    response["no_finding"] = clear_response()["no_finding"]
+    with pytest.raises(AssessmentError, match="null no_finding"):
+        parse_finding(response, frame("tool result: id=1", "write settings.json"))
 
 
 def test_finding_requires_exact_supplied_evidence():

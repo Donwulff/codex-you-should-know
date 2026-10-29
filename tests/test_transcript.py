@@ -132,7 +132,7 @@ def test_preserves_request_after_initial_user_instruction_messages(tmp_path: Pat
     )
     text = read_transcript(path, max_chars=512)
     assert len(text) <= 512
-    assert "[Initial user messages]" in text
+    assert sum(label == "user" for label, _ in source_blocks(text)) == 3
     assert "Actual request: repair exporter" in text
     assert "Latest synthetic result: exporter verified" in text
 
@@ -146,7 +146,101 @@ def test_three_initial_messages_fit_the_minimum_budget(tmp_path: Path) -> None:
     text = read_transcript(path, max_chars=256)
     assert len(text) <= 256
     assert "Latest result" in text
-    assert "[Initial user messages]" in text
+    assert sum(label == "user" for label, _ in source_blocks(text)) == 3
+
+
+@pytest.mark.parametrize("budget", [1000, 60000, 200000])
+def test_resumed_session_keeps_latest_requests_after_tool_heavy_work(tmp_path, budget):
+    requests = ["Current request: review the exporter", "Keep the existing format", "Continue"]
+    path = rollout(
+        tmp_path,
+        *(message("user", f"Obsolete request {i}") for i in range(3)),
+        *(message("user", request) for request in requests),
+        *(
+            {"type": "function_call_output", "call_id": str(i), "output": "work " * 1000}
+            for i in range(60)
+        ),
+        message("assistant", "Current exporter review complete"),
+    )
+    text, offset = read_snapshot(path, budget)
+    assert len(text) <= budget
+    assert "Obsolete request" not in text
+    assert all(text.count(request) == 1 for request in requests)
+    assert [text.index(request) for request in requests] == sorted(
+        text.index(request) for request in requests
+    )
+    assert "Current exporter review complete" in text
+    assert offset == path.stat().st_size
+
+
+@pytest.mark.parametrize("phase_field", [{"phase": "final_answer"}, {"channel": "final"}])
+def test_disclosure_in_recent_activity_survives_user_reservation(tmp_path, phase_field):
+    disclosure = "ALREADY DISCLOSED: timestamps use the wrong timezone."
+    latest = "Latest result: configuration reviewed."
+    path = rollout(
+        tmp_path,
+        message("user", "CURRENT REQUEST: " + "u" * 500),
+        {"type": "function_call_output", "call_id": "old", "output": "old" * 200},
+        {**message("assistant", disclosure), **phase_field},
+        {"type": "function_call_output", "call_id": "new", "output": "x" * 600},
+        {**message("assistant", latest), **phase_field},
+    )
+    text = read_transcript(path, 1000)
+    assert len(text) <= 1000
+    assert "CURRENT REQUEST" in text
+    assert disclosure in text and latest in text
+    assert text.index(disclosure) < text.index(latest)
+    assert text.count(disclosure) == 1
+
+
+def test_disclosures_outside_recent_activity_survive_tool_heavy_followup(tmp_path):
+    disclosures = [
+        "Disclosed limitation: no timezone conversion.",
+        "Disclosed cost: extra storage.",
+    ]
+    path = rollout(
+        tmp_path,
+        message("user", "Investigate the exporter"),
+        *(
+            {**message("assistant", disclosure), "phase": "final_answer"}
+            for disclosure in disclosures
+        ),
+        message("user", "Continue checking configuration"),
+        *(
+            {"type": "function_call_output", "call_id": str(i), "output": "work " * 1000}
+            for i in range(60)
+        ),
+        message("assistant", "The check is still running"),
+    )
+    text = read_transcript(path, 2000)
+    assert len(text) <= 2000
+    assert all(text.count(disclosure) == 1 for disclosure in disclosures)
+    assert text.index(disclosures[0]) < text.index(disclosures[1]) < text.index("Continue checking")
+    assert "The check is still running" in text
+
+
+def test_recent_final_reply_uses_room_beyond_its_reserved_minimum(tmp_path):
+    latest = "Current final reply: " + "z" * 300
+    path = rollout(
+        tmp_path,
+        message("user", "Current question"),
+        {"type": "function_call_output", "call_id": "old", "output": "x" * 2000},
+        {**message("assistant", latest), "phase": "final_answer"},
+    )
+    text = read_transcript(path, 1000)
+    assert len(text) <= 1000
+    assert latest in text
+
+
+def test_reclipping_never_leaves_partial_generated_markers_as_evidence():
+    from you_should_know.transcript import _TRUNCATED, _clip_block
+
+    block = _clip_block(frame("user", "A" * 1000), 200)
+    for budget in range(20, 200):
+        clipped = _clip_block(block, budget)
+        assert len(clipped) <= budget
+        for _, body in source_blocks(clipped):
+            assert set(body.replace(_TRUNCATED, "").replace("…", "")) <= {"A"}
 
 
 def test_marks_truncation_inside_a_large_message(tmp_path: Path) -> None:

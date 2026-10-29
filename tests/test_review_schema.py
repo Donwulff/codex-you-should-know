@@ -2,8 +2,14 @@ import json
 from pathlib import Path
 
 import pytest
+from review_responses import clear_response
 
-from you_should_know.assessment import AssessmentError, parse_confirmation, parse_finding
+from you_should_know.assessment import (
+    NO_FINDING_CATEGORIES,
+    AssessmentError,
+    parse_confirmation,
+    parse_finding,
+)
 from you_should_know.transcript import frame
 
 RESOURCES = Path(__file__).resolve().parents[1] / "resources"
@@ -39,16 +45,32 @@ def test_finding_schema_bounds_text_at_the_parser_limits(field, maximum):
         if length == maximum:
             if field != "evidence":
                 value[field] = text.replace("\r", "x")
-            assert parse_finding({"finding": value}, transcript) is not None
+            assert parse_finding({"finding": value, "no_finding": None}, transcript) is not None
         else:
             with pytest.raises(AssessmentError, match=f"invalid {field}"):
-                parse_finding({"finding": value}, transcript)
+                parse_finding({"finding": value, "no_finding": None}, transcript)
 
 
 def test_finding_schema_limits_quote_count():
     schema = finding_fields()["evidence"]
     assert schema["minItems"] == 1
     assert schema["maxItems"] == 3
+
+
+def test_no_finding_schema_and_parser_require_bounded_classification():
+    schema = json.loads((RESOURCES / "finding.schema.json").read_text())
+    assert set(schema["required"]) == {"finding", "no_finding"}
+    decision = schema["properties"]["no_finding"]["anyOf"][1]
+    assert set(decision["required"]) == {"category", "reason"}
+    assert set(decision["properties"]["category"]["enum"]) == set(NO_FINDING_CATEGORIES)
+    assert decision["properties"]["reason"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 800,
+    }
+    assert parse_finding(clear_response(reason="漢" * 800), "conversation") is None
+    with pytest.raises(AssessmentError, match="invalid no_finding reason"):
+        parse_finding(clear_response(reason="漢" * 801), "conversation")
 
 
 def test_confirmation_schema_allows_withdrawal_without_evidence_and_bounds_quotes():

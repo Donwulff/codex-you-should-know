@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from .backend import MAX_PROMPT_BYTES
-from .transcript import _TRUNCATED, frame, source_blocks
+from .transcript import _FINAL_ASSISTANT, _TRUNCATED, _clip, frame, source_blocks
 
 
 class AssessmentError(ValueError):
@@ -17,6 +17,28 @@ class Finding:
     summary: str
     explanation: str
     evidence: list[str]
+
+
+NO_FINDING_CATEGORIES = (
+    "no_concern",
+    "already_disclosed",
+    "in_progress",
+    "insufficient_evidence",
+    "resolved_or_accepted",
+    "already_reported",
+)
+
+MAX_REJECTED_RESPONSE_CHARS = 16_384
+
+
+def rejected_response_diagnostics(response: object) -> dict:
+    """Retain bounded, unvalidated JSON for inspection, never as a finding."""
+    encoded = json.dumps(response, ensure_ascii=True, separators=(",", ":"))
+    return {
+        "json": encoded[:MAX_REJECTED_RESPONSE_CHARS],
+        "length": len(encoded),
+        "truncated": len(encoded) > MAX_REJECTED_RESPONSE_CHARS,
+    }
 
 
 def _text(value: object, field: str, maximum: int) -> str:
@@ -59,7 +81,10 @@ def _evidence(value: object, transcript: str, *, assistant_claim: bool = False) 
     ):
         raise AssessmentError("A finding must cite evidence from a tool-result block")
     if assistant_claim and not any(
-        quote in text for label, text in blocks if label == "assistant" for quote in quotes
+        quote in text
+        for label, text in blocks
+        if label in {"assistant", _FINAL_ASSISTANT}
+        for quote in quotes
     ):
         raise AssessmentError("A finding about an assistant claim must quote the assistant too")
     return quotes
@@ -142,13 +167,27 @@ def evidence_diagnostics(response: object, transcript: str, reason: str) -> dict
 
 
 def parse_finding(
-    response: object, transcript: str, *, suppressed: list[dict] | None = None
+    response: object,
+    transcript: str,
+    *,
+    suppressed: list[dict] | None = None,
+    diagnostics: dict | None = None,
 ) -> Finding | None:
-    if not isinstance(response, dict) or set(response) != {"finding"}:
-        raise AssessmentError("Reviewer response must contain exactly the finding field")
+    if not isinstance(response, dict) or set(response) != {"finding", "no_finding"}:
+        raise AssessmentError("Reviewer response must contain finding and no_finding fields")
     value = response["finding"]
     if value is None:
+        decision = response["no_finding"]
+        if not isinstance(decision, dict) or set(decision) != {"category", "reason"}:
+            raise AssessmentError("No-finding result must contain category and reason")
+        if decision["category"] not in NO_FINDING_CATEGORIES:
+            raise AssessmentError("Reviewer returned invalid no_finding category")
+        reason = _text(decision["reason"], "no_finding reason", 800)
+        if diagnostics is not None:
+            diagnostics["no_finding"] = {"category": decision["category"], "reason": reason}
         return None
+    if response["no_finding"] is not None:
+        raise AssessmentError("A finding must have null no_finding diagnostics")
     fields = {
         "topic",
         "summary",
@@ -192,7 +231,8 @@ to verify, not established facts. A command proposal is not evidence of executio
 Every finding must be demonstrated by a tool result in the conversation. A file
 merely repeating a bug report does not demonstrate that the running code has it.
 Length-framed source headers identify user, assistant, tool call, and tool result
-blocks. Labels quoted inside a block belong to that block, not a new source.
+blocks. The assistant final label identifies a final assistant reply.
+Labels quoted inside a block belong to that block, not a new source.
 Evidence quotes must be exact contiguous text from block bodies, never invented
 or rewritten. Cite one to three quotes, at most 500 characters each. At least
 one must come from a tool-result block. For a contradiction of an assistant claim,
@@ -207,10 +247,45 @@ Never join text across block boundaries or omitted portions.
 
 Check the assistant's latest visible messages explicitly before claiming a concern
 was not disclosed. Withdraw anything already disclosed, fixed, accepted, or still
-being investigated. Do not infer failure from omitted/truncated context or from
+being investigated. User messages can span different tasks: use the latest
+request and its corrections to identify the current goal. An older request can
+be completed or superseded. If the current goal is missing, do not infer a scope
+violation from an old request alone.
+Do not infer failure from omitted/truncated context or from
 the transcript ending. Missing later records do not demonstrate an unresolved bug.
 Prefer silence over weak, speculative, generic, or repetitive notes.
 """
+
+
+def _excerpt_parts(blocks: list[tuple[str, str]], keep: int) -> str:
+    """Clip source bodies without making existing omission markers into evidence."""
+    marker = "\n[... conversation shortened to fit reviewer input budget ...]\n"
+    parts = [
+        (label, part, index > 0)
+        for label, body in blocks
+        for index, part in enumerate(body.split(_TRUNCATED))
+    ]
+    total = sum(len(body) for _, body, _ in parts)
+    keep = min(keep, total)
+    first = total if keep == total else keep // 3
+    last = keep - first
+    head, tail = [], []
+    position = 0
+    for label, body, gap in parts:
+        prefix_end = min(len(body), max(0, first - position))
+        suffix_start = max(0, total - last - position)
+        if prefix_end:
+            if gap:
+                head.append(_TRUNCATED.strip())
+            head.append(frame(label, body[:prefix_end]))
+        if suffix_start < len(body):
+            if gap and suffix_start == 0:
+                tail.append(_TRUNCATED.strip())
+            tail.append(frame(label, body[suffix_start:]))
+        position += len(body)
+    if keep == total:
+        return "\n\n".join(head)
+    return "\n\n".join(head) + marker + "\n\n".join(tail)
 
 
 def _excerpt(text: str, keep: int) -> str:
@@ -218,33 +293,44 @@ def _excerpt(text: str, keep: int) -> str:
         return text
     marker = "\n[... conversation shortened to fit reviewer input budget ...]\n"
     blocks = list(source_blocks(text))
+    users = [index for index, (label, _) in enumerate(blocks) if label == "user"][-3:]
+    finals = [index for index, (label, _) in enumerate(blocks) if label == _FINAL_ASSISTANT][-2:]
+    if users or finals:
+        sizes = [sum(len(part) for part in body.split(_TRUNCATED)) for _, body in blocks]
+        # The final byte-budget pass must not undo the transcript reader's
+        # protection of recent requests. Divide reserved space between them.
+        per_user = keep // (3 * max(1, len(users)))
+        budgets = {index: min(sizes[index], per_user) for index in users}
+        per_final = keep // (4 * max(1, len(finals)))
+        budgets.update((index, min(sizes[index], per_final)) for index in finals)
+        protected = set(users) | set(finals)
+        remaining = keep - sum(budgets.values())
+        for index in reversed(range(len(blocks))):
+            if index not in budgets:
+                budgets[index] = min(sizes[index], remaining)
+                remaining -= budgets[index]
+        # Short activity leaves room for more of long requests.
+        for index in sorted(protected, reverse=True):
+            extra = min(sizes[index] - budgets[index], remaining)
+            budgets[index] += extra
+            remaining -= extra
+        pieces = [marker.strip()]
+        previous = -1
+        for index, block in enumerate(blocks):
+            if not budgets[index]:
+                continue
+            if index > previous + 1:
+                pieces.append(marker.strip())
+            if index in protected:
+                # Keep one frame per message. A later confirmation may clip
+                # this excerpt again; fragments must not become separate messages.
+                pieces.append(frame(block[0], _clip(block[1], budgets[index])))
+            else:
+                pieces.append(_excerpt_parts([block], budgets[index]))
+            previous = index
+        return "\n\n".join(pieces)
     if blocks:
-        parts = [
-            (label, part, index > 0)
-            for label, body in blocks
-            for index, part in enumerate(body.split(_TRUNCATED))
-        ]
-        total = sum(len(body) for _, body, _ in parts)
-        keep = min(keep, total)
-        first = total if keep == total else keep // 3
-        last = keep - first
-        head, tail = [], []
-        position = 0
-        for label, body, gap in parts:
-            prefix_end = min(len(body), max(0, first - position))
-            suffix_start = max(0, total - last - position)
-            if prefix_end:
-                if gap:
-                    head.append(_TRUNCATED.strip())
-                head.append(frame(label, body[:prefix_end]))
-            if suffix_start < len(body):
-                if gap and suffix_start == 0:
-                    tail.append(_TRUNCATED.strip())
-                tail.append(frame(label, body[suffix_start:]))
-            position += len(body)
-        if keep == total:
-            return "\n\n".join(head)
-        return "\n\n".join(head) + marker + "\n\n".join(tail)
+        return _excerpt_parts(blocks, keep)
     first = keep // 3
     last = keep - first
     return text[:first] + marker + (text[-last:] if last else "")
@@ -277,7 +363,18 @@ even with different wording or capitalization.
         + focus
         + _RESTRICTIONS
         + """
-Return {"finding": null} when nothing qualifies. Otherwise return one finding with:
+Return both finding and no_finding. When nothing qualifies, set finding to null
+and no_finding to an object with category and reason. Choose the primary reason:
+no_concern: no concrete concern was identified in the supplied evidence;
+already_disclosed: the assistant already explained the same practical consequence;
+in_progress: the assistant is addressing the concern or needs a chance to respond;
+insufficient_evidence: a possible concern lacks supporting tool-result evidence;
+resolved_or_accepted: the concern was fixed or the user accepted the tradeoff;
+already_reported: this concern appears in previous notes or known/dismissed topics.
+The reason must be a specific short decision summary of at most 800 characters,
+not an extended analysis or a claim that all work is correct. Do not invent a
+concern to explain a no_concern result.
+When returning a finding, set no_finding to null and provide:
 topic: a stable description of the affected object AND consequence, at most 160 characters;
 summary: one plain sentence addressed to the user, at most 280 characters;
 explanation: why it matters, at most 1600 characters, distinguishing inference

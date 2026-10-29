@@ -20,6 +20,7 @@ from .assessment import (
     parse_finding,
     prepare_confirmation_prompt,
     prepare_prompt,
+    rejected_response_diagnostics,
 )
 from .config import Config, ConfigError, data_directory, load_config
 from .host import noninteractive_host
@@ -285,7 +286,9 @@ def check(
                 )
                 usage = getattr(response, "usage", {})
                 suppressed: list[dict] = []
-                finding = parse_finding(response, evidence_transcript, suppressed=suppressed)
+                finding = parse_finding(
+                    response, evidence_transcript, suppressed=suppressed, diagnostics=diagnostics
+                )
                 state.finish(session_id, time.time(), digest)
                 suppressed_id = None
                 for item in suppressed:
@@ -300,9 +303,12 @@ def check(
                         checkpoint=checkpoint,
                     )
                 if not finding:
+                    if not suppressed:
+                        decision = diagnostics["no_finding"]
+                        return outcome("clear", decision["reason"], no_finding=decision)
                     return outcome(
-                        "suppressed" if suppressed else "clear",
-                        suppressed[0]["reason"] if suppressed else "",
+                        "suppressed",
+                        suppressed[0]["reason"],
                         candidate_id=suppressed_id,
                     )
                 duplicate = state.has_topic(finding.topic)
@@ -414,6 +420,7 @@ def check(
                         backend_diagnostics.get("retry_after_seconds", 300),
                     )
             if isinstance(error, AssessmentError):
+                diagnostics["rejected_response"] = rejected_response_diagnostics(response)
                 rejected = evidence_diagnostics(response, evidence_transcript, detail)
                 if rejected is not None:
                     diagnostics["evidence_rejection"] = rejected
